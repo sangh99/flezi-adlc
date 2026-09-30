@@ -18,6 +18,10 @@
       "import": "./dist/sandboxes/podman.js",
       "types": "./dist/sandboxes/podman.d.ts"
     },
+    "./sandboxes/remote-docker": {
+      "import": "./dist/sandboxes/remote-docker.js",
+      "types": "./dist/sandboxes/remote-docker.d.ts"
+    },
     "./sandboxes/no-sandbox": {
       "import": "./dist/sandboxes/no-sandbox.js",
       "types": "./dist/sandboxes/no-sandbox.d.ts"

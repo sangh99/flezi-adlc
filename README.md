@@ -22,6 +22,7 @@ Sandcastle is provider-agnostic — it ships with built-in providers for Docker 
 - A sandbox provider — Sandcastle needs an isolated environment to run agents in. Built-in options:
   - [Docker Desktop](https://www.docker.com/) — most common for local development
   - [Podman](https://podman.io/) — rootless alternative to Docker
+  - A remote Docker daemon (e.g. a Linux server over SSH) — only the Docker CLI is needed locally
   - Or [create your own](#custom-sandbox-providers) using `createBindMountSandboxProvider` or `createIsolatedSandboxProvider`
 
 ## Quick start
@@ -66,23 +67,35 @@ await run({
 
 Sandcastle uses a `SandboxProvider` to create isolated environments. The `sandbox` option on `run()`, `interactive()`, and `createSandbox()` accepts any provider, including `noSandbox()` — opt in to running the agent directly on the host when container isolation is undesired. Built-in providers:
 
-| Provider   | Import path                                | Type       | Accepted by                                 |
-| ---------- | ------------------------------------------ | ---------- | ------------------------------------------- |
-| Docker     | `@ai-hero/sandcastle/sandboxes/docker`     | Bind-mount | `run()`, `createSandbox()`, `interactive()` |
-| Podman     | `@ai-hero/sandcastle/sandboxes/podman`     | Bind-mount | `run()`, `createSandbox()`, `interactive()` |
-| No-sandbox | `@ai-hero/sandcastle/sandboxes/no-sandbox` | None       | `run()`, `createSandbox()`, `interactive()` |
+| Provider      | Import path                                   | Type       | Accepted by                                 |
+| ------------- | --------------------------------------------- | ---------- | ------------------------------------------- |
+| Docker        | `@ai-hero/sandcastle/sandboxes/docker`        | Bind-mount | `run()`, `createSandbox()`, `interactive()` |
+| Podman        | `@ai-hero/sandcastle/sandboxes/podman`        | Bind-mount | `run()`, `createSandbox()`, `interactive()` |
+| Remote Docker | `@ai-hero/sandcastle/sandboxes/remote-docker` | Isolated   | `run()`, `createSandbox()`, `interactive()` |
+| No-sandbox    | `@ai-hero/sandcastle/sandboxes/no-sandbox`    | None       | `run()`, `createSandbox()`, `interactive()` |
 
 Worktree methods (`wt.run()`, `wt.interactive()`, `wt.createSandbox()`) accept the same providers as their top-level counterparts. `wt.interactive()` defaults to `noSandbox()` when no sandbox is specified.
 
 ```typescript
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
+import { remoteDocker } from "@ai-hero/sandcastle/sandboxes/remote-docker";
 import { noSandbox } from "@ai-hero/sandcastle/sandboxes/no-sandbox";
 
 // Docker and Podman are interchangeable in run() and createSandbox():
 await run({
   agent: claudeCode("claude-opus-4-8"),
   sandbox: docker(),
+  prompt: "...",
+});
+
+// Remote Docker runs the container on another machine's Docker daemon.
+// The repo is copied in and changes are synced back, so no bind mounts are needed.
+// Build the image on that daemon first:
+//   DOCKER_HOST=ssh://user@build-server npx sandcastle docker build-image
+await run({
+  agent: claudeCode("claude-opus-4-8"),
+  sandbox: remoteDocker({ host: "ssh://user@build-server" }), // or { context: "build-server" }
   prompt: "...",
 });
 
@@ -1320,6 +1333,7 @@ For real-world examples, see:
 
 - [`src/sandboxes/docker.ts`](src/sandboxes/docker.ts) — bind-mount provider using Docker containers (with SELinux label support)
 - [`src/sandboxes/podman.ts`](src/sandboxes/podman.ts) — bind-mount provider using Podman containers (with SELinux label support)
+- [`src/sandboxes/remote-docker.ts`](src/sandboxes/remote-docker.ts) — isolated provider using a remote Docker daemon via `docker -H` / `--context`
 - [`src/sandboxes/test-isolated.ts`](src/sandboxes/test-isolated.ts) — isolated provider using temp directories (used in tests)
 
 ## Configuration

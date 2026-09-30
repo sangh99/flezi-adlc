@@ -11,6 +11,7 @@ export default defineConfig({
     main: "src/main.ts",
     "sandboxes/docker": "src/sandboxes/docker.ts",
     "sandboxes/podman": "src/sandboxes/podman.ts",
+    "sandboxes/remote-docker": "src/sandboxes/remote-docker.ts",
     "sandboxes/no-sandbox": "src/sandboxes/no-sandbox.ts",
   },
   format: ["esm"],

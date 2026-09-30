@@ -14,17 +14,9 @@
       "import": "./dist/sandboxes/docker.js",
       "types": "./dist/sandboxes/docker.d.ts"
     },
-    "./sandboxes/vercel": {
-      "import": "./dist/sandboxes/vercel.js",
-      "types": "./dist/sandboxes/vercel.d.ts"
-    },
     "./sandboxes/podman": {
       "import": "./dist/sandboxes/podman.js",
       "types": "./dist/sandboxes/podman.d.ts"
-    },
-    "./sandboxes/daytona": {
-      "import": "./dist/sandboxes/daytona.js",
-      "types": "./dist/sandboxes/daytona.d.ts"
     },
     "./sandboxes/no-sandbox": {
       "import": "./dist/sandboxes/no-sandbox.js",
@@ -46,7 +38,6 @@
     "release": "changeset publish",
     "sandcastle": "npm run build && tsx .sandcastle/run.ts",
     "test-podman": "npm run build && tsx --env-file=.sandcastle/.env .sandcastle/test-podman.ts",
-    "test-vercel": "npm run build && tsx --env-file=.sandcastle/.env .sandcastle/test-vercel.ts",
     "test-interactive": "npm run build && tsx --env-file=.sandcastle/.env .sandcastle/test-interactive.ts"
   },
   "keywords": [
@@ -64,7 +55,6 @@
   "license": "MIT",
   "devDependencies": {
     "@changesets/cli": "^2.30.0",
-    "@daytona/sdk": "^0.164.0",
     "@effect/cli": "^0.74.0",
     "@effect/platform": "^0.95.0",
     "@effect/platform-node": "^0.105.0",
@@ -84,18 +74,6 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.1.0"
-  },
-  "peerDependencies": {
-    "@daytona/sdk": "^0.164.0",
-    "@vercel/sandbox": ">=1.0.0"
-  },
-  "peerDependenciesMeta": {
-    "@vercel/sandbox": {
-      "optional": true
-    },
-    "@daytona/sdk": {
-      "optional": true
-    }
   },
   "files": [
     "dist"

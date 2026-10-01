@@ -142,6 +142,8 @@ export interface SandboxInfo {
   readonly applyToHost?: () => Effect.Effect<void, SyncError>;
   /** The bind-mount sandbox handle, available when the provider is a bind-mount provider. Used for session capture. */
   readonly bindMountHandle?: BindMountSandboxHandle;
+  /** True for the no-sandbox provider: commands run directly on the host. */
+  readonly runsOnHost?: boolean;
 }
 
 export interface WithSandboxResult<A> {
@@ -367,6 +369,7 @@ export const WorktreeDockerSandboxFactory = {
                         {
                           hostWorktreePath: hostRepoDir,
                           sandboxRepoPath: worktreePath,
+                          runsOnHost: true,
                         },
                         sandbox,
                       ) as Effect.Effect<A, E | SandboxError, R>,
@@ -426,6 +429,7 @@ export const WorktreeDockerSandboxFactory = {
                           {
                             hostWorktreePath: worktreeInfo.path,
                             sandboxRepoPath: worktreePath,
+                            runsOnHost: true,
                           },
                           sandbox,
                         ),

@@ -529,6 +529,18 @@ const CUSTOM_ENV_EXAMPLE = `# TODO: add any env vars your issue tracker needs (e
 
 const ISSUE_TRACKER_REGISTRY: IssueTrackerEntry[] = [
   {
+    name: "beads",
+    label: "Beads",
+    templateArgs: {
+      // Epics are specs/PRDs that group tickets, not work an agent should pick up.
+      LIST_TASKS_COMMAND: "bd ready --json --exclude-type epic",
+      VIEW_TASK_COMMAND: "bd show <ID>",
+      CLOSE_TASK_COMMAND: `bd close <ID> --reason="Completed by Sandcastle"`,
+      ISSUE_TRACKER_TOOLS: BEADS_TOOLS,
+    },
+    envExample: "",
+  },
+  {
     name: "github-issues",
     label: "GitHub Issues",
     templateArgs: {
@@ -541,17 +553,6 @@ const ISSUE_TRACKER_REGISTRY: IssueTrackerEntry[] = [
 # Create a fine-grained token: https://github.com/settings/personal-access-tokens/new
 # Required repository permissions: Issues (Read and write) and Metadata (Read)
 GH_TOKEN=`,
-  },
-  {
-    name: "beads",
-    label: "Beads",
-    templateArgs: {
-      LIST_TASKS_COMMAND: "bd ready --json",
-      VIEW_TASK_COMMAND: "bd show <ID>",
-      CLOSE_TASK_COMMAND: `bd close <ID> --reason="Completed by Sandcastle"`,
-      ISSUE_TRACKER_TOOLS: BEADS_TOOLS,
-    },
-    envExample: "",
   },
   {
     name: "custom",
@@ -1024,7 +1025,7 @@ export const scaffold = (
       model,
       templateName = "blank",
       createLabel = true,
-      issueTracker = ISSUE_TRACKER_REGISTRY[0]!, // default: github-issues
+      issueTracker = ISSUE_TRACKER_REGISTRY[0]!, // default: beads
       sandboxProvider = SANDBOX_PROVIDER_REGISTRY[0]!, // default: docker
     } = options;
     const fs = yield* FileSystem.FileSystem;

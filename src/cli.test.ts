@@ -1,5 +1,5 @@
 import { exec } from "node:child_process";
-import { mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -243,19 +243,40 @@ describe("sandcastle CLI", () => {
     expect(entries).toContain("prompt.md");
   });
 
-  it("init without --agent fails fast with a clear non-interactive error message", async () => {
+  it("init without --issue-tracker defaults to beads", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "cli-host-"));
     await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
-    try {
-      await runCli("init --template blank --sandbox docker", hostDir);
-      expect.fail("Expected command to fail");
-    } catch (err: unknown) {
-      const { stdout, stderr } = err as { stdout: string; stderr: string };
-      const output = stdout + stderr;
-      expect(output).toContain("--agent");
-      expect(output).toContain("non-interactive");
-    }
+    const { stdout } = await runCli(
+      "init --agent claude-code --template simple-loop --sandbox docker --build-image false --install-template-deps false",
+      hostDir,
+    );
+
+    expect(stdout).toContain("Init complete");
+    const prompt = await readFile(
+      join(hostDir, ".sandcastle", "prompt.md"),
+      "utf-8",
+    );
+    expect(prompt).toContain("bd ready --json --exclude-type epic");
+  });
+
+  it("init without --agent defaults to claude-code", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "cli-host-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    const { stdout } = await runCli(
+      "init --template blank --sandbox docker --build-image false",
+      hostDir,
+    );
+
+    expect(stdout).toContain("Init complete");
+    const dockerfile = await readFile(
+      join(hostDir, ".sandcastle", "Dockerfile"),
+      "utf-8",
+    );
+    expect(dockerfile).toContain("claude");
   });
 
   it("init --issue-tracker github-issues without --create-label fails fast in non-interactive mode", async () => {

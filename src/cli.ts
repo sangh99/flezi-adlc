@@ -91,7 +91,7 @@ const templateOption = Options.text("template").pipe(
 );
 
 const agentOption = Options.text("agent").pipe(
-  Options.withDescription("Agent to use (e.g. claude-code)"),
+  Options.withDescription("Agent to use (default: claude-code)"),
   Options.optional,
 );
 
@@ -109,7 +109,7 @@ const sandboxOption = Options.text("sandbox").pipe(
 
 const issueTrackerOption = Options.text("issue-tracker").pipe(
   Options.withDescription(
-    "Issue tracker to use (e.g. github-issues, beads, custom)",
+    "Issue tracker to use (e.g. beads, github-issues, custom)",
   ),
   Options.optional,
 );
@@ -266,7 +266,7 @@ const initCommand = Command.make(
           return confirmed === true;
         });
 
-      // Resolve agent: CLI flag > interactive select
+      // Resolve agent: CLI flag > claude-code (default, no prompt)
       const agents = listAgents();
       let selectedAgent: AgentEntry;
       if (agentFlag._tag === "Some") {
@@ -281,26 +281,7 @@ const initCommand = Command.make(
         }
         selectedAgent = entry!;
       } else {
-        if (!isInteractive) {
-          yield* failIfNonInteractive("--agent");
-        }
-        const selected = yield* Effect.promise(() =>
-          clack.select({
-            message: "Select an agent:",
-            initialValue: "claude-code",
-            options: agents.map((a) => ({
-              value: a.name,
-              label: a.label,
-              hint: `Default model: ${a.defaultModel}`,
-            })),
-          }),
-        );
-        if (clack.isCancel(selected)) {
-          yield* Effect.fail(
-            new InitError({ message: "Agent selection cancelled." }),
-          );
-        }
-        selectedAgent = getAgent(selected as string)!;
+        selectedAgent = getAgent("claude-code")!;
       }
 
       // Resolve model: CLI flag > agent default
@@ -337,34 +318,11 @@ const initCommand = Command.make(
         selectedSandboxProvider = getSandboxProvider(selected as string)!;
       }
 
-      // Resolve issue tracker: CLI flag > interactive select (already validated above)
-      const issueTrackers = listIssueTrackers();
-      let selectedIssueTracker: IssueTrackerEntry;
-      if (issueTrackerFlag._tag === "Some") {
-        selectedIssueTracker = getIssueTracker(issueTrackerFlag.value)!;
-      } else {
-        if (!isInteractive) {
-          yield* failIfNonInteractive("--issue-tracker");
-        }
-        const selected = yield* Effect.promise(() =>
-          clack.select({
-            message: "Select an issue tracker:",
-            initialValue: "github-issues",
-            options: issueTrackers.map((b) => ({
-              value: b.name,
-              label: b.label,
-            })),
-          }),
-        );
-        if (clack.isCancel(selected)) {
-          yield* Effect.fail(
-            new InitError({
-              message: "Issue tracker selection cancelled.",
-            }),
-          );
-        }
-        selectedIssueTracker = getIssueTracker(selected as string)!;
-      }
+      // Resolve issue tracker: CLI flag > beads (default, no prompt)
+      const selectedIssueTracker: IssueTrackerEntry =
+        issueTrackerFlag._tag === "Some"
+          ? getIssueTracker(issueTrackerFlag.value)!
+          : getIssueTracker("beads")!;
 
       // Resolve template: CLI flag > interactive select (already validated above)
       let selectedTemplate: string;

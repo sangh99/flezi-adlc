@@ -6,6 +6,12 @@ For user-facing changes, add a changeset to `.changeset`. Check all changesets t
 
 When changing public-facing behavior, check `README.md` to see if the documentation needs updating.
 
+## Steering
+
+- [`docs/steering/product.md`](docs/steering/product.md): read it before you decide scope, add a feature or built-in, or touch the ADLC kit's gates and factory.
+- [`docs/steering/tech.md`](docs/steering/tech.md): read it before you write or test code. It covers the Effect conventions, the commands and the test seams.
+- [`docs/steering/structure.md`](docs/steering/structure.md): read it when you need to find where something lives or decide where a new file goes.
+
 ## Agent skills
 
 ### Issue tracker

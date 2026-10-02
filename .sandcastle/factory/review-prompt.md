@@ -20,7 +20,7 @@ The spec's tasks, all merged into this branch:
 
 # REVIEW AND FIX
 
-Use the `code-review` skill to review the changes since `{{BASE_BRANCH}}` (its merge-base with this branch). The spec above is the originating spec for the review's Spec axis.
+Use the `code-review` skill to review the changes since `{{BASE_BRANCH}}` (its merge-base with this branch). The spec above is the originating spec for the review's Spec axis. It and the task list are all the issue context you get: the commits name issue IDs, but don't look any issue up.
 
 Fix every finding that is a real problem: code that breaks the repo's standards or doesn't do what the spec asks. Keep fixes inside the spec's scope. Don't add features or refactor beyond what a finding needs. If a finding needs a decision from a person, don't fix it: put it in the pull request body under a heading that says it needs a decision.
 

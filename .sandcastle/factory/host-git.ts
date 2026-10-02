@@ -1,7 +1,7 @@
 /**
- * Git operations the factory runs in the host repo. None of them touch a
- * working tree: they only write objects and move branch refs, so the host's
- * checked-out branch and files never change.
+ * Git operations the factory runs in the host repo. Besides removing
+ * worktrees sandboxes left behind, they only write objects and move branch
+ * refs, so the host's checked-out branch and files never change.
  */
 import { realpath } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
@@ -39,29 +39,44 @@ export const ensureBranch = async (
 /**
  * Point `branch` at `from`, creating it if needed, so work on it starts
  * fresh: whatever an earlier attempt left on it is dropped. A worktree
- * Sandcastle left behind on the branch (under `.sandcastle/worktrees/`) is
- * removed first, since Sandcastle would otherwise reuse it. Refuses if any
- * other worktree has the branch checked out.
+ * Sandcastle left behind on the branch is removed first (see
+ * `removeSandboxWorktree`), since Sandcastle would otherwise reuse it.
  */
 export const freshBranch = async (
   repoDir: string,
   branch: string,
   from: string,
 ): Promise<void> => {
-  const checkedOut = await worktreeWithBranch(repoDir, branch);
-  if (checkedOut) {
-    // git prints real paths; compare real paths on both sides.
-    const real = (path: string) => realpath(path).catch(() => path);
-    const managed = await real(join(repoDir, ".sandcastle", "worktrees"));
-    const rel = relative(managed, await real(checkedOut));
-    if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
-      throw new Error(
-        `Branch ${branch} is checked out at ${checkedOut}; the factory won't reset a checked-out branch.`,
-      );
-    }
-    await git(repoDir, ["worktree", "remove", "--force", checkedOut]);
-  }
+  await removeSandboxWorktree(repoDir, branch, "reset");
   await git(repoDir, ["branch", "--force", "--no-track", branch, from]);
+};
+
+/**
+ * Remove the worktree a sandbox left behind with `branch` checked out, with
+ * any uncommitted changes in it, so the branch can move or a fresh sandbox
+ * can open on it. Sandcastle keeps a sandbox's worktree when it has
+ * uncommitted changes. Only removes a worktree under `.sandcastle/worktrees/`:
+ * refuses if any other worktree, the host checkout included, has the branch
+ * checked out, naming `action` as what the factory won't do. Does nothing if
+ * no worktree has it checked out.
+ */
+export const removeSandboxWorktree = async (
+  repoDir: string,
+  branch: string,
+  action: string,
+): Promise<void> => {
+  const checkedOut = await worktreeWithBranch(repoDir, branch);
+  if (!checkedOut) return;
+  // git prints real paths; compare real paths on both sides.
+  const real = (path: string) => realpath(path).catch(() => path);
+  const managed = await real(join(repoDir, ".sandcastle", "worktrees"));
+  const rel = relative(managed, await real(checkedOut));
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(
+      `Branch ${branch} is checked out at ${checkedOut}; the factory won't ${action} a checked-out branch.`,
+    );
+  }
+  await git(repoDir, ["worktree", "remove", "--force", checkedOut]);
 };
 
 export type MergeResult =

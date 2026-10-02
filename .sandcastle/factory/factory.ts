@@ -38,7 +38,12 @@ import {
 } from "../../src/index.js";
 import { docker } from "../../src/sandboxes/docker.js";
 import type { CodeHost } from "./code-host.js";
-import { ensureBranch, freshBranch, mergeBranch } from "./host-git.js";
+import {
+  ensureBranch,
+  freshBranch,
+  mergeBranch,
+  removeSandboxWorktree,
+} from "./host-git.js";
 import type { Tracker, TrackerIssue } from "./tracker.js";
 
 export const LABELS = {
@@ -681,6 +686,9 @@ const land = async (
       `${integration} was left as it was.`,
     ].join("\n");
 
+  // A spec review that failed may have left its sandbox's worktree on the
+  // integration branch, and the merge would refuse it.
+  await removeSandboxWorktree(ctx.repoDir, integration, "merge into");
   const first = await merge();
   if (first.ok) return first;
 
@@ -885,6 +893,9 @@ const review = async (
   tasks: readonly TrackerIssue[],
   branch: string,
 ): Promise<{ ok: true; note: string; prBody: string } | BuildFailure> => {
+  // Sandcastle would reuse a worktree an earlier review left behind, with
+  // that attempt's uncommitted changes in it.
+  await removeSandboxWorktree(ctx.repoDir, branch, "review");
   await using sandbox = await openSandbox(ctx, branch, ctx.baseBranch);
   const run = await sandbox.run({
     name: `Reviewer ${spec.id}`,

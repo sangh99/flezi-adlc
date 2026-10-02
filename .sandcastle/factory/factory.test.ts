@@ -128,17 +128,21 @@ const featureAgent = (
     const reviewed = /^Review spec (\S+):/m.exec(prompt)?.[1];
     if (!reviewed) throw new Error(`unexpected prompt:\n${prompt}`);
     calls.push({ role: "review", id: reviewed, prompt, files });
-    if (options.review) return options.review(cwd);
-    await writeFile(join(cwd, "review.txt"), "reviewed\n");
-    await git(cwd, "add", "-A");
-    await git(cwd, "commit", "-m", "Address review findings");
-    return `Reviewed.\n<factory-result>\n${JSON.stringify({
-      status: "done",
-      note: "Fixed one finding.",
-      prBody: "## Summary\nAll the spec's files.",
-    })}\n</factory-result>`;
+    return (options.review ?? passingReview)(cwd);
   };
   return { calls, script };
+};
+
+/** A reviewer that commits `review.txt` and returns a PR body. */
+const passingReview = async (cwd: string): Promise<string> => {
+  await writeFile(join(cwd, "review.txt"), "reviewed\n");
+  await git(cwd, "add", "-A");
+  await git(cwd, "commit", "-m", "Address review findings");
+  return `Reviewed.\n<factory-result>\n${JSON.stringify({
+    status: "done",
+    note: "Fixed one finding.",
+    prBody: "## Summary\nAll the spec's files.",
+  })}\n</factory-result>`;
 };
 
 /** Commit subjects on `ref`, newest first. */
@@ -888,6 +892,90 @@ describe("runFactory, failures and retries", () => {
     // The review pass builds on the integration branch the first run left.
     expect(await git(repoDir, "rev-parse", "factory/s-1^")).toBe(integration);
     expect(host.pullRequests).toHaveLength(1);
+  }, 60_000);
+
+  /**
+   * A spec whose first review leaves an uncommitted file behind and reports
+   * blocked; every later review passes.
+   */
+  const specWithDirtyFailedReview = async () => {
+    let reviews = 0;
+    const agent = featureAgent({
+      review: async (cwd) => {
+        if (++reviews > 1) return passingReview(cwd);
+        await writeFile(join(cwd, "half-done.txt"), "not committed\n");
+        return result("blocked", "Half way through a finding.");
+      },
+    });
+    const ctx = await setup(
+      [spec({ id: "s-1" }), featureTask({ id: "s-1.1", parent: "s-1" })],
+      { agentScript: agent.script, checks: [] },
+    );
+    await ctx.run();
+    expect(ctx.tracker.issue("s-1").labels).toContain("factory-failed");
+    return ctx;
+  };
+
+  it("lands later work on a spec whose failed review left uncommitted changes behind", async () => {
+    const { repoDir, baseSha, tracker, host, run } =
+      await specWithDirtyFailedReview();
+
+    // A person files a task for the finding and asks for a retry.
+    tracker.add(featureTask({ id: "s-1.2", parent: "s-1" }));
+    await tracker.tracker.removeLabel("s-1", "factory-failed");
+    const report = await run();
+
+    expect(report.outcomes).toEqual([
+      expect.objectContaining({ taskId: "s-1.2", status: "accepted" }),
+    ]);
+    expect(await subjects(repoDir, "factory/s-1")).toContain("Implement s-1.2");
+    expect(host.pullRequests).toHaveLength(1);
+    const pr = host.pullRequests[0]!;
+    expect(pr).toMatchObject({ branch: "factory/s-1" });
+    // The failed review's leftovers don't reach the pull request.
+    expect(
+      await git(repoDir, "ls-tree", "--name-only", pr.headSha),
+    ).not.toContain("half-done.txt");
+    await expectHostUntouched(repoDir, baseSha);
+  }, 60_000);
+
+  it("leaves alone a person's own worktree of the integration branch, and merges nothing into it", async () => {
+    const agent = featureAgent();
+    const { repoDir, tracker, run } = await setup(
+      [spec({ id: "s-1" }), featureTask({ id: "s-1.1", parent: "s-1" })],
+      { agentScript: agent.script, checks: [] },
+    );
+    const own = await mkdtemp(join(tmpdir(), "factory-test-own-"));
+    tempDirs.push(own);
+    await git(repoDir, "branch", "factory/s-1", "main");
+    await git(repoDir, "worktree", "add", own, "factory/s-1");
+    await writeFile(join(own, "mine.txt"), "uncommitted\n");
+
+    const report = await run();
+
+    expect(report).toMatchObject({ taken: 1, failed: 1 });
+    expect(tracker.issue("s-1.1").comments.join("\n")).toContain("checked out");
+    expect(await git(own, "status", "--porcelain")).toContain("mine.txt");
+    expect(await subjects(repoDir, "factory/s-1")).not.toContain(
+      "Implement s-1.1",
+    );
+  }, 60_000);
+
+  it("retries a failed review without the uncommitted changes it left behind", async () => {
+    const { repoDir, baseSha, tracker, host, run } =
+      await specWithDirtyFailedReview();
+
+    await tracker.tracker.removeLabel("s-1", "factory-failed");
+    const report = await run();
+
+    expect(report.specs).toEqual([
+      expect.objectContaining({ specId: "s-1", status: "pr-opened" }),
+    ]);
+    const pr = host.pullRequests[0]!;
+    expect(
+      await git(repoDir, "ls-tree", "--name-only", pr.headSha),
+    ).not.toContain("half-done.txt");
+    await expectHostUntouched(repoDir, baseSha);
   }, 60_000);
 
   it("keeps a task's claim alive while its agent runs", async () => {

@@ -816,6 +816,80 @@ describe("runFactory, failures and retries", () => {
     expect(tracker.issue("t-1").status).toBe("closed");
   }, 60_000);
 
+  it.each([
+    { workflow: "quick", seed: quickTask({ id: "t-1" }) },
+    { workflow: "bugfix", seed: bug({ id: "t-1" }) },
+  ])(
+    "on retrying a $workflow item whose pull request opened before the factory failed, closes it without building or opening another",
+    async ({ seed }) => {
+      let builds = 0;
+      const { tracker, host, run } = await setup([seed], {
+        checks: [],
+        agentScript: async (cwd) => {
+          builds++;
+          return committingAgent(cwd);
+        },
+      });
+      const close = tracker.tracker.close;
+      tracker.tracker.close = async () => {
+        throw new Error("bd close failed");
+      };
+
+      const first = await run();
+
+      expect(first).toMatchObject({ taken: 1, failed: 1 });
+      expect(host.pullRequests).toHaveLength(1);
+      const pr = host.pullRequests[0]!;
+      expect(tracker.issue("t-1").labels).toContain("factory-failed");
+
+      tracker.tracker.close = close;
+      await tracker.tracker.removeLabel("t-1", "factory-failed");
+      const retried = await run();
+
+      expect(retried).toMatchObject({ taken: 1, accepted: 1, failed: 0 });
+      expect(builds).toBe(1);
+      expect(host.pullRequests).toHaveLength(1);
+      const task = tracker.issue("t-1");
+      expect(task.status).toBe("closed");
+      expect(task.closeReason).toContain(pr.url);
+      expect(task.comments.join("\n")).toContain(pr.url);
+    },
+    60_000,
+  );
+
+  it("on retrying a Feature task that merged before the factory failed, closes it without building or merging it again", async () => {
+    const agent = featureAgent();
+    const { repoDir, tracker, host, run } = await setup(
+      [spec({ id: "s-1" }), featureTask({ id: "s-1.1", parent: "s-1" })],
+      { agentScript: agent.script, checks: [] },
+    );
+    const close = tracker.tracker.close;
+    tracker.tracker.close = async () => {
+      throw new Error("bd close failed");
+    };
+
+    await run();
+
+    expect(tracker.issue("s-1.1").labels).toContain("factory-failed");
+    const integration = await git(repoDir, "rev-parse", "factory/s-1");
+
+    tracker.tracker.close = close;
+    await tracker.tracker.removeLabel("s-1.1", "factory-failed");
+    const retried = await run();
+
+    expect(retried.outcomes).toEqual([
+      expect.objectContaining({ taskId: "s-1.1", status: "accepted" }),
+    ]);
+    expect(tracker.issue("s-1.1").status).toBe("closed");
+    expect(agent.calls.map((c) => `${c.role} ${c.id}`)).toEqual([
+      "implement s-1.1",
+      "review s-1",
+    ]);
+    // The review pass builds on the integration branch the first run left.
+    expect(await git(repoDir, "rev-parse", "factory/s-1^")).toBe(integration);
+    expect(host.pullRequests).toHaveLength(1);
+  }, 60_000);
+
   it("keeps a task's claim alive while its agent runs", async () => {
     let waitForHeartbeat: (id: string) => Promise<void> = async () => {};
     const { tracker, run } = await setup([quickTask({ id: "t-1" })], {

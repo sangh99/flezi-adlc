@@ -58,8 +58,19 @@ export const LABELS = {
   prOpened: "factory-pr-opened",
 } as const;
 
-/** Spec metadata key holding the URL of the pull request the factory opened. */
+/**
+ * Metadata key holding the URL of the pull request the factory opened, on a
+ * spec, a Quick task or a bug. Set as soon as the pull request opens, so a
+ * retry after a later failure doesn't build the work again.
+ */
 export const PR_URL_KEY = "factory.pr";
+
+/**
+ * Feature task metadata key holding the merge commit that landed the task
+ * on its spec's integration branch. Set as soon as the merge lands, so a
+ * retry after a later failure doesn't build or merge the task again.
+ */
+export const MERGED_KEY = "factory.merged";
 
 export interface FactoryOptions {
   readonly tracker: Tracker;
@@ -452,7 +463,8 @@ const markdownSection = (body: string, heading: string): string | undefined => {
 
 /**
  * Build a Quick task or a bug on its own branch cut from the base branch,
- * then push it, open its pull request and close the issue.
+ * then push it, open its pull request and close the issue. If an earlier
+ * attempt opened the pull request, only comment it and close the issue.
  */
 const runOwnBranch = async (
   ctx: Context,
@@ -483,9 +495,27 @@ const runOwnBranch = async (
   }
 
   const stopRenewing = keepClaim(ctx, ready.id);
+  const closeWithPr = async (url: string) => {
+    await ctx.tracker.comment(
+      ready.id,
+      `Factory opened a pull request: ${url}`,
+    );
+    await ctx.tracker.close(ready.id, `Pull request opened: ${url}`);
+  };
   let url: string | undefined;
   try {
     const task = await ctx.tracker.readIssue(ready.id);
+    url = task.metadata[PR_URL_KEY];
+    if (url) {
+      // An earlier attempt opened it, then failed before closing the issue.
+      ctx.log(`  ${task.id} already has its pull request: ${url}`);
+      await closeWithPr(url);
+      return outcome(
+        "accepted",
+        `Pull request opened by an earlier run: ${url}`,
+      );
+    }
+
     const built = await build(ctx, {
       branch,
       baseBranch: ctx.baseBranch,
@@ -507,14 +537,15 @@ const runOwnBranch = async (
         "\n",
       ),
     });
-    await ctx.tracker.comment(task.id, `Factory opened a pull request: ${url}`);
-    await ctx.tracker.close(task.id, `Pull request opened: ${url}`);
+    // Recorded first, so a retry after a failure from here only closes it.
+    await ctx.tracker.setMetadata(task.id, PR_URL_KEY, url);
+    await closeWithPr(url);
     return outcome("accepted", built.note, url);
   } catch (error) {
     const note = url
       ? `Pull request ${url} was opened, then the factory failed: ${messageOf(error)}`
       : `Factory error: ${messageOf(error)}`;
-    await parkTask(ctx, ready.id, NO_PR, note);
+    await parkTask(ctx, ready.id, url ? NOT_CLOSED : NO_PR, note);
     return outcome("failed", note, url);
   } finally {
     stopRenewing();
@@ -525,7 +556,10 @@ const runOwnBranch = async (
 // Feature workflow
 // ---------------------------------------------------------------------------
 
-/** Build one task of a spec and merge it into the spec's integration branch. */
+/**
+ * Build one task of a spec and merge it into the spec's integration branch,
+ * then close it. If an earlier attempt merged it, only close it.
+ */
 const runFeatureTask = async (
   ctx: Context,
   ready: TrackerIssue,
@@ -552,8 +586,20 @@ const runFeatureTask = async (
   }
 
   const stopRenewing = keepClaim(ctx, ready.id);
+  let merged: string | undefined;
   try {
     const task = await ctx.tracker.readIssue(ready.id);
+    merged = task.metadata[MERGED_KEY];
+    if (merged) {
+      // An earlier attempt merged it, then failed before closing the task.
+      ctx.log(`  ${task.id} was already merged into ${integration}: ${merged}`);
+      await ctx.tracker.close(task.id, `Merged into ${integration}`);
+      return outcome(
+        "accepted",
+        `Merged into ${integration} by an earlier run, as ${merged}.`,
+      );
+    }
+
     await ctx.onIntegrationBranch(integration, () =>
       ensureBranch(ctx.repoDir, integration, ctx.baseBranch),
     );
@@ -587,11 +633,16 @@ const runFeatureTask = async (
       return outcome("failed", landed.note);
     }
 
+    merged = landed.sha;
+    // Recorded first, so a retry after a failure from here only closes it.
+    await ctx.tracker.setMetadata(task.id, MERGED_KEY, merged);
     await ctx.tracker.close(task.id, `Merged into ${integration}`);
     return outcome("accepted", built.note);
   } catch (error) {
-    const note = `Factory error: ${messageOf(error)}`;
-    await parkTask(ctx, ready.id, NOT_MERGED, note);
+    const note = merged
+      ? `Merged into ${integration} as ${merged}, then the factory failed: ${messageOf(error)}`
+      : `Factory error: ${messageOf(error)}`;
+    await parkTask(ctx, ready.id, merged ? NOT_CLOSED : NOT_MERGED, note);
     return outcome("failed", note);
   } finally {
     stopRenewing();
@@ -613,7 +664,7 @@ const land = async (
     readonly branch: string;
     readonly integration: string;
   },
-): Promise<{ ok: true } | BuildFailure> => {
+): Promise<{ ok: true; sha: string } | BuildFailure> => {
   const { task, branch, integration } = job;
   const merge = () =>
     mergeBranch(ctx.repoDir, {
@@ -631,7 +682,7 @@ const land = async (
     ].join("\n");
 
   const first = await merge();
-  if (first.ok) return { ok: true };
+  if (first.ok) return first;
 
   ctx.log(`  ${branch} conflicts with ${integration}: running a merge agent`);
   const resolved = await resolveConflicts(ctx, job, first);
@@ -639,7 +690,7 @@ const land = async (
     return { ok: false, note: conflictNote(first.conflicts, resolved.note) };
   }
   const second = await merge();
-  if (second.ok) return { ok: true };
+  if (second.ok) return second;
   return {
     ok: false,
     note: conflictNote(
@@ -992,6 +1043,8 @@ const readAgentResult = async <T>(
 
 const NO_PR = "Factory did not open a pull request.";
 const NOT_MERGED = "Factory did not merge this task.";
+const NOT_CLOSED =
+  "Factory did its work on this issue, then failed before closing it. A retry only closes it.";
 
 /**
  * Comment why on `id` and mark it `factory-failed`. The label is added even

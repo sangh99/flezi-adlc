@@ -834,6 +834,22 @@ describe("runFactory, failures and retries", () => {
     expect(report).toMatchObject({ taken: 1, accepted: 1 });
     expect(tracker.issue("t-1").heartbeats).toBeGreaterThan(0);
   }, 60_000);
+
+  it("parks a failed task and gives its claim back even when commenting on it fails", async () => {
+    const { tracker, run } = await setup([quickTask({ id: "t-1" })], {
+      agentScript: async () => result("blocked", "Stuck."),
+    });
+    tracker.tracker.comment = async () => {
+      throw new Error("bd comment failed");
+    };
+
+    const report = await run();
+
+    expect(report).toMatchObject({ taken: 1, failed: 1 });
+    const task = tracker.issue("t-1");
+    expect(task.labels).toContain("factory-failed");
+    expect(task).toMatchObject({ status: "open", assignee: undefined });
+  }, 60_000);
 });
 
 describe("runFactory, spec lifecycle across runs", () => {

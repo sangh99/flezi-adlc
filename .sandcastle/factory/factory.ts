@@ -505,7 +505,7 @@ const runOwnBranch = async (
     const note = url
       ? `Pull request ${url} was opened, then the factory failed: ${messageOf(error)}`
       : `Factory error: ${messageOf(error)}`;
-    await parkTask(ctx, ready.id, NO_PR, note).catch(() => {});
+    await parkTask(ctx, ready.id, NO_PR, note);
     return outcome("failed", note, url);
   } finally {
     stopRenewing();
@@ -582,7 +582,7 @@ const runFeatureTask = async (
     return outcome("accepted", built.note);
   } catch (error) {
     const note = `Factory error: ${messageOf(error)}`;
-    await parkTask(ctx, ready.id, NOT_MERGED, note).catch(() => {});
+    await parkTask(ctx, ready.id, NOT_MERGED, note);
     return outcome("failed", note);
   } finally {
     stopRenewing();
@@ -984,6 +984,10 @@ const readAgentResult = async <T>(
 const NO_PR = "Factory did not open a pull request.";
 const NOT_MERGED = "Factory did not merge this task.";
 
+/**
+ * Comment why on `id` and mark it `factory-failed`. The label is added even
+ * if the comment can't be; rejects with the first error once both were tried.
+ */
 const recordFailure = async (
   ctx: Context,
   id: string,
@@ -991,14 +995,22 @@ const recordFailure = async (
   note: string,
 ) => {
   ctx.log(`  failed: ${note.split("\n")[0]}`);
-  await ctx.tracker.comment(id, `${headline}\n\n${note}`);
-  await ctx.tracker.addLabel(id, LABELS.factoryFailed);
+  const errors: unknown[] = [];
+  await ctx.tracker
+    .comment(id, `${headline}\n\n${note}`)
+    .catch((error) => errors.push(error));
+  await ctx.tracker
+    .addLabel(id, LABELS.factoryFailed)
+    .catch((error) => errors.push(error));
+  if (errors.length > 0) throw errors[0];
 };
 
 /**
  * Park a task the factory claimed and gave up on: record why, mark it
  * `factory-failed`, then give the claim back. Labelled before it is open
- * again, so no run sees it ready without the label.
+ * again, so no run sees it ready without the label. The claim is given back
+ * even if recording the failure fails, so the task is never left claimed.
+ * Never rejects: what it couldn't do is logged.
  */
 const parkTask = async (
   ctx: Context,
@@ -1006,8 +1018,14 @@ const parkTask = async (
   headline: string,
   note: string,
 ) => {
-  await recordFailure(ctx, id, headline, note);
-  await ctx.tracker.release(id);
+  await recordFailure(ctx, id, headline, note).catch((error) =>
+    ctx.log(`  could not record the failure on ${id}: ${messageOf(error)}`),
+  );
+  await ctx.tracker
+    .release(id)
+    .catch((error) =>
+      ctx.log(`  could not release the claim on ${id}: ${messageOf(error)}`),
+    );
 };
 
 const summarise = (

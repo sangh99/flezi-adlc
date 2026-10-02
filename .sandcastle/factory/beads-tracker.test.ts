@@ -64,6 +64,16 @@ describe.skipIf(!hasBd)("beadsTracker against a real bd database", () => {
       "ready-for-agent",
       "--silent",
     );
+    ids.closedChild = await bd(
+      "create",
+      "A finished spec task",
+      "--type",
+      "task",
+      "--parent",
+      ids.spec,
+      "--silent",
+    );
+    await bd("close", ids.closedChild, "--reason", "done");
     ids.blocker = await bd("create", "A blocker", "--type", "task", "--silent");
     ids.blocked = await bd(
       "create",
@@ -109,6 +119,24 @@ describe.skipIf(!hasBd)("beadsTracker against a real bd database", () => {
     expect(quick.parent).toBeUndefined();
     expect(quick.body).toContain("Do the thing.");
     expect(quick.body).toContain("The thing is done");
+  }, 30_000);
+
+  it("lists every child of a spec, whatever its status", async () => {
+    const children = await tracker.listChildren(ids.spec!);
+    const byId = new Map(children.map((issue) => [issue.id, issue]));
+
+    expect([...byId.keys()].sort()).toEqual(
+      [ids.child!, ids.closedChild!].sort(),
+    );
+    expect(byId.get(ids.child!)).toMatchObject({
+      status: "open",
+      labels: ["ready-for-agent"],
+      parent: ids.spec,
+    });
+    expect(byId.get(ids.closedChild!)).toMatchObject({
+      status: "closed",
+      parent: ids.spec,
+    });
   }, 30_000);
 
   it("claims, comments, labels and closes", async () => {

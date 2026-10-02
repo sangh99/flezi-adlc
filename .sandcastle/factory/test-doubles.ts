@@ -32,21 +32,21 @@ export interface InMemoryIssue {
 export const inMemoryTracker = (
   seed: ReadonlyArray<Partial<InMemoryIssue> & { id: string }>,
 ) => {
-  const issues = new Map<string, InMemoryIssue>(
-    seed.map((s) => [
-      s.id,
-      {
-        title: s.id,
-        type: "task",
-        status: "open",
-        labels: [],
-        body: "",
-        blockedBy: [],
-        comments: [],
-        ...s,
-      },
-    ]),
-  );
+  const issues = new Map<string, InMemoryIssue>();
+  /** File a new issue, as a person would between factory runs. */
+  const add = (s: Partial<InMemoryIssue> & { id: string }) => {
+    issues.set(s.id, {
+      title: s.id,
+      type: "task",
+      status: "open",
+      labels: [],
+      body: "",
+      blockedBy: [],
+      comments: [],
+      ...s,
+    });
+  };
+  seed.forEach(add);
 
   const get = (id: string): InMemoryIssue => {
     const issue = issues.get(id);
@@ -74,6 +74,8 @@ export const inMemoryTracker = (
             i.blockedBy.every((b) => get(b).status === "closed"),
         )
         .map(view),
+    listChildren: async (parentId) =>
+      [...issues.values()].filter((i) => i.parent === parentId).map(view),
     readIssue: async (id) => view(get(id)),
     claim: async (id) => {
       get(id).status = "in_progress";
@@ -96,7 +98,7 @@ export const inMemoryTracker = (
     },
   };
 
-  return { tracker, issue: get };
+  return { tracker, issue: get, add };
 };
 
 export interface FakePullRequest extends PullRequestRequest {
@@ -146,10 +148,12 @@ const toClaudeStreamJson = (text: string): string =>
 /**
  * An isolated sandbox provider (a temp dir on the host) whose `claude`
  * command is replaced by `agent`, a script that receives the sandbox repo
- * directory and returns the agent's final text. Every other command, such as
+ * directory and the prompt, and returns the agent's final text. Every other command, such as
  * the factory's checks, runs for real in the sandbox directory.
  */
-export const scriptedSandbox = (agent: (cwd: string) => Promise<string>) => {
+export const scriptedSandbox = (
+  agent: (cwd: string, prompt: string) => Promise<string>,
+) => {
   const base = testIsolated();
   return createIsolatedSandboxProvider({
     name: "scripted",
@@ -161,7 +165,10 @@ export const scriptedSandbox = (agent: (cwd: string) => Promise<string>) => {
           if (!command.startsWith("claude ")) {
             return handle.exec(command, execOptions);
           }
-          const text = await agent(execOptions?.cwd ?? handle.worktreePath);
+          const text = await agent(
+            execOptions?.cwd ?? handle.worktreePath,
+            execOptions?.stdin ?? "",
+          );
           const stream = toClaudeStreamJson(text);
           for (const line of stream.split("\n")) execOptions?.onLine?.(line);
           return { stdout: stream, stderr: "", exitCode: 0 };

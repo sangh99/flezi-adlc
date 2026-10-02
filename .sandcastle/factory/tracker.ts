@@ -19,6 +19,8 @@ export interface TrackerIssue {
 export interface Tracker {
   /** Unblocked, non-epic work, in the tracker's priority order. */
   listReady(): Promise<readonly TrackerIssue[]>;
+  /** Every child of `parentId` (for a spec, its tasks), in any status. */
+  listChildren(parentId: string): Promise<readonly TrackerIssue[]>;
   readIssue(id: string): Promise<TrackerIssue>;
   /** Mark the issue as taken by the factory, so nobody else picks it up. */
   claim(id: string): Promise<void>;

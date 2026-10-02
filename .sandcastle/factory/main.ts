@@ -8,7 +8,8 @@
  * Environment:
  *   FACTORY_BASE_BRANCH   Branch work is cut from and PRs target (default: main).
  *
- * Exits 1 if any task it took failed, so a scheduler can notice.
+ * Exits 1 if any task it took, or any spec's review and pull request, failed,
+ * so a scheduler can notice.
  */
 import { beadsTracker } from "./beads-tracker.js";
 import { gitHubCodeHost } from "./code-host.js";
@@ -23,4 +24,6 @@ const report = await runFactory({
   baseBranch: process.env.FACTORY_BASE_BRANCH || "main",
 });
 
-if (report.failed > 0) process.exitCode = 1;
+if (report.failed > 0 || report.specs.some((s) => s.status === "failed")) {
+  process.exitCode = 1;
+}

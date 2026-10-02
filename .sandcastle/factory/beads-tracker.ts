@@ -42,6 +42,17 @@ export const beadsTracker = (options: {
       ]);
       return (issues as BeadsIssueJson[]).map(toTrackerIssue);
     },
+    listChildren: async (parentId) => {
+      const issues = await bdJson([
+        "list",
+        "--parent",
+        parentId,
+        "--all",
+        "--limit",
+        "0",
+      ]);
+      return (issues as BeadsIssueJson[]).map(toTrackerIssue);
+    },
     readIssue: async (id) => {
       const [issue] = (await bdJson(["show", id])) as BeadsIssueJson[];
       if (!issue) throw new Error(`bd show ${id} returned no issue`);

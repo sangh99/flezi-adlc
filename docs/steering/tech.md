@@ -1,6 +1,6 @@
 # Tech
 
-Terms in **bold** are defined in [`CONTEXT.md`](../../CONTEXT.md).
+Terms in **bold** are defined in [`GLOSSARY.md`](../../GLOSSARY.md).
 
 ## Stack
 

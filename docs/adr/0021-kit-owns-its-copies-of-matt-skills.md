@@ -1,6 +1,6 @@
 # The ADLC kit owns its copies of Matt's skills
 
-The skills under `.agents/skills/` were installed from `mattpocock/skills`, and `skills-lock.json` records a hash for each one, which suggests they are untouched upstream copies. They aren't: the **ADLC kit** edits them in place to fit its workflows (Beads, **approval gates**, `CONTEXT.md` instead of `GLOSSARY.md`, "task" instead of "ticket").
+The skills under `.agents/skills/` were installed from `mattpocock/skills`, and `skills-lock.json` records a hash for each one, which suggests they are untouched upstream copies. They aren't: the **ADLC kit** edits them in place to fit its workflows (Beads, **approval gates**, "task" instead of "ticket").
 
 To keep taking upstream improvements, unmodified upstream copies live on a `vendor/skills` branch. Upstream updates are pulled there and merged into main, so git's three-way merge keeps our edits and only conflicts where upstream changed the same lines.
 

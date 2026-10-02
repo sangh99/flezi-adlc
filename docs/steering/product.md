@@ -1,6 +1,6 @@
 # Product
 
-Terms in **bold** are defined in [`CONTEXT.md`](../../CONTEXT.md); use them as written there.
+Terms in **bold** are defined in [`GLOSSARY.md`](../../GLOSSARY.md); use them as written there.
 
 ## Sandcastle
 

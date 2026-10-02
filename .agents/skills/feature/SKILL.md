@@ -27,7 +27,7 @@ If the ID is not an epic, say so: a task belongs to `/quick`, a bug to `/bugfix`
 
 ## 2. Grill
 
-Call the Skill tool twice, for "grilling" and "domain-modeling", as `/grill-with-docs` does. This repo's glossary is `CONTEXT.md`, with ADRs in `docs/adr/` (see `docs/agents/domain.md`).
+Call the Skill tool twice, for "grilling" and "domain-modeling", as `/grill-with-docs` does. This repo's glossary is `GLOSSARY.md`, with ADRs in `docs/adr/` (see `docs/agents/domain.md`).
 
 Done when the grilling frontier is empty and the person has confirmed you share an understanding.
 

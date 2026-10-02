@@ -1,6 +1,6 @@
 # Structure
 
-Terms in **bold** are defined in [`CONTEXT.md`](../../CONTEXT.md).
+Terms in **bold** are defined in [`GLOSSARY.md`](../../GLOSSARY.md).
 
 ## `src/`: the engine
 
@@ -21,7 +21,7 @@ The directory is flat: one module per concern, each with its tests beside it. Fi
 
 ## Repo root
 
-- `AGENTS.md` is the only agent instructions file; CI rejects any `CLAUDE.md`. `CONTEXT.md` is the glossary.
+- `AGENTS.md` is the only agent instructions file; CI rejects any `CLAUDE.md`. `GLOSSARY.md` is the glossary.
 - `docs/adr/`: decision records, numbered. Two kit ADRs cover the kit itself: 0021 (skills) and 0022 (Beads).
 - `docs/agents/`: how the skills operate on this repo: `issue-tracker.md` (Beads commands, gate labels), `factory.md` (running the factory), `triage.md`, `domain.md`, plus the guides for adding an agent provider or an issue tracker.
 - `docs/steering/`: these files. `docs/` is also a Fumadocs site, and its pages live in `docs/content/docs/`.
@@ -40,5 +40,5 @@ The directory is flat: one module per concern, each with its tests beside it. Fi
 
 ## Factory and dogfooding
 
-- **`.sandcastle/`** is this repo's own **config directory**: the `Dockerfile` the sandbox image is built from, `CODING_STANDARDS.md`, the `test-*.ts` smoke scripts, `agent-workflows/` (the scripts behind `.github/workflows/agent-*.yml`) and `factory/`. It is distinct from the **workflows** defined in `CONTEXT.md`.
+- **`.sandcastle/`** is this repo's own **config directory**: the `Dockerfile` the sandbox image is built from, `CODING_STANDARDS.md`, the `test-*.ts` smoke scripts, `agent-workflows/` (the scripts behind `.github/workflows/agent-*.yml`) and `factory/`. It is distinct from the **workflows** defined in `GLOSSARY.md`.
 - **`.sandcastle/factory/`** is the **factory**, started by `npm run factory` ([`docs/agents/factory.md`](../agents/factory.md)). `factory.ts` holds the run. `main.ts` wires in the production adapters: `beads-tracker.ts` for the `Tracker` port (`tracker.ts`), `code-host.ts` for `git push` and `gh`, and `host-git.ts` for merges on the host. The `*-prompt.md` files are the sandboxed agents' prompts, and `test-doubles.ts` backs `factory.test.ts`. Its own `tsconfig.json` is covered by `npm run typecheck`.

@@ -26,7 +26,7 @@ EOF
 
 ## 2. Diagnose
 
-Call the Skill tool for "diagnosing-bugs" and work through it with the person, up to the end of Phase 4. This repo's glossary is `CONTEXT.md`.
+Call the Skill tool for "diagnosing-bugs" and work through it with the person, up to the end of Phase 4. This repo's glossary is `GLOSSARY.md`.
 
 Done when both hold:
 

@@ -73,6 +73,17 @@ export interface FactoryOptions {
   readonly sandboxSetup?: readonly string[];
   /** Host paths copied into each worktree. Default: `["node_modules"]`. */
   readonly copyToWorktree?: readonly string[];
+  /**
+   * Most pieces of work built at once, each in its own sandbox. Merges into
+   * a spec's integration branch still happen one at a time. Default: 4.
+   */
+  readonly parallel?: number;
+  /**
+   * How often, in milliseconds, the factory renews its claim on a piece of
+   * work while it runs. Beads' claims lapse after 5 minutes without one.
+   * Default: 60_000.
+   */
+  readonly heartbeatMs?: number;
   /** Progress lines. Default: `console.log`. */
   readonly log?: (line: string) => void;
 }
@@ -154,28 +165,18 @@ export const runFactory = async (
 ): Promise<FactoryReport> => {
   const ctx = resolveOptions(options);
 
-  // One task at a time, re-reading the ready list after each, so a task
-  // unblocked by a Feature task closing earlier in the run is taken in this
-  // run too. Each task is attempted at most once per run, which also bounds
-  // the loop: every pass takes a task not seen before. Sequential for now;
-  // a parallel limit can take a wave of the ready list here later.
-  const attempted = new Set<string>();
   const outcomes: TaskOutcome[] = [];
   /** Specs that gained work this run: candidates for their pull request. */
   const landedSpecs = new Set<string>();
-  for (;;) {
-    const work = await findWork(ctx.tracker);
-    const item = work.find((w) => !attempted.has(w.task.id));
-    if (!item) break;
-    attempted.add(item.task.id);
+  await runAll(ctx, async (item) => {
     if (item.workflow !== "feature") {
       outcomes.push(await runOwnBranch(ctx, item.workflow, item.task));
-      continue;
+      return;
     }
     const outcome = await runFeatureTask(ctx, item.task, item.spec);
     outcomes.push(outcome);
     if (outcome.status === "accepted") landedSpecs.add(item.spec.id);
-  }
+  });
 
   const specs: SpecOutcome[] = [];
   for (const specId of landedSpecs) {
@@ -201,6 +202,74 @@ export const formatReport = (report: FactoryReport): string =>
         `  ${s.status === "pr-opened" ? "+" : "x"} ${s.specId} (spec) ${s.pullRequestUrl ?? s.note}`,
     ),
   ].join("\n");
+
+// ---------------------------------------------------------------------------
+// Scheduling
+// ---------------------------------------------------------------------------
+
+/**
+ * Run `runItem` on every eligible piece of work, up to `ctx.parallel` at
+ * once. The ready list is read again whenever a slot frees up, so work
+ * unblocked by a Feature task closing earlier in the run is taken in this
+ * run too. Each piece is attempted at most once per run, which also bounds
+ * the loop. Ends once nothing is running and nothing new is eligible.
+ */
+const runAll = async (
+  ctx: Context,
+  runItem: (item: WorkItem) => Promise<void>,
+): Promise<void> => {
+  const attempted = new Set<string>();
+  const running = new Set<Promise<void>>();
+  for (;;) {
+    if (running.size < ctx.parallel) {
+      for (const item of await findWork(ctx.tracker)) {
+        if (running.size >= ctx.parallel) break;
+        if (attempted.has(item.task.id)) continue;
+        attempted.add(item.task.id);
+        const job: Promise<void> = runItem(item)
+          .catch((error) =>
+            ctx.log(`  ${item.task.id} failed: ${messageOf(error)}`),
+          )
+          .finally(() => running.delete(job));
+        running.add(job);
+      }
+    }
+    if (running.size === 0) return;
+    await Promise.race(running);
+  }
+};
+
+/**
+ * Renew the claim on `id` every `ctx.heartbeatMs` until the returned
+ * function is called. A failed renewal is logged; the work carries on.
+ */
+const keepClaim = (ctx: Context, id: string): (() => void) => {
+  const timer = setInterval(() => {
+    ctx.tracker
+      .heartbeat(id)
+      .catch((error) =>
+        ctx.log(`  could not renew the claim on ${id}: ${messageOf(error)}`),
+      );
+  }, ctx.heartbeatMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
+};
+
+/**
+ * Runs jobs one at a time per key, in the order they were queued. Jobs on
+ * different keys run independently.
+ */
+const keyedQueue = () => {
+  const tails = new Map<string, Promise<unknown>>();
+  return <T>(key: string, job: () => Promise<T>): Promise<T> => {
+    const run = (tails.get(key) ?? Promise.resolve()).then(job);
+    tails.set(
+      key,
+      run.catch(() => {}),
+    );
+    return run;
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Eligibility
@@ -271,19 +340,35 @@ const findWork = async (tracker: Tracker): Promise<WorkItem[]> => {
 type Context = Required<Omit<FactoryOptions, "agent" | "sandbox">> & {
   readonly agent: AgentProvider;
   readonly sandbox: SandboxProvider;
+  /**
+   * Runs host writes to one integration branch one at a time, keyed by the
+   * branch, so concurrent tasks of a spec never merge into it at once.
+   */
+  readonly onIntegrationBranch: ReturnType<typeof keyedQueue>;
 };
 
-const resolveOptions = (options: FactoryOptions): Context => ({
-  repoDir: process.cwd(),
-  baseBranch: "main",
-  checks: ["npm run typecheck", "npm test"],
-  sandboxSetup: ["npm install"],
-  copyToWorktree: ["node_modules"],
-  log: console.log,
-  ...options,
-  agent: options.agent ?? claudeCode("claude-opus-5-5"),
-  sandbox: options.sandbox ?? docker(),
-});
+const resolveOptions = (options: FactoryOptions): Context => {
+  const parallel = options.parallel ?? 4;
+  if (!Number.isInteger(parallel) || parallel < 1) {
+    throw new Error(
+      `parallel must be a whole number of at least 1, not ${parallel}`,
+    );
+  }
+  return {
+    repoDir: process.cwd(),
+    baseBranch: "main",
+    checks: ["npm run typecheck", "npm test"],
+    sandboxSetup: ["npm install"],
+    copyToWorktree: ["node_modules"],
+    heartbeatMs: 60_000,
+    log: console.log,
+    ...options,
+    parallel,
+    agent: options.agent ?? claudeCode("claude-opus-5-5"),
+    sandbox: options.sandbox ?? docker(),
+    onIntegrationBranch: keyedQueue(),
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Quick and Bugfix workflows
@@ -376,6 +461,7 @@ const runOwnBranch = async (
     return outcome("failed", `Could not claim: ${messageOf(error)}`);
   }
 
+  const stopRenewing = keepClaim(ctx, ready.id);
   let url: string | undefined;
   try {
     const task = await ctx.tracker.readIssue(ready.id);
@@ -409,6 +495,8 @@ const runOwnBranch = async (
       : `Factory error: ${messageOf(error)}`;
     await parkTask(ctx, ready.id, NO_PR, note).catch(() => {});
     return outcome("failed", note, url);
+  } finally {
+    stopRenewing();
   }
 };
 
@@ -442,9 +530,12 @@ const runFeatureTask = async (
     return outcome("failed", `Could not claim: ${messageOf(error)}`);
   }
 
+  const stopRenewing = keepClaim(ctx, ready.id);
   try {
     const task = await ctx.tracker.readIssue(ready.id);
-    await ensureBranch(ctx.repoDir, integration, ctx.baseBranch);
+    await ctx.onIntegrationBranch(integration, () =>
+      ensureBranch(ctx.repoDir, integration, ctx.baseBranch),
+    );
     const built = await build(ctx, {
       branch,
       baseBranch: integration,
@@ -465,7 +556,11 @@ const runFeatureTask = async (
       return outcome("failed", built.note);
     }
 
-    const landed = await land(ctx, { task, spec, branch, integration });
+    // The merge agent, if one is needed, runs inside the queue too, so its
+    // retry merges against the same integration commit it resolved.
+    const landed = await ctx.onIntegrationBranch(integration, () =>
+      land(ctx, { task, spec, branch, integration }),
+    );
     if (!landed.ok) {
       await parkTask(ctx, task.id, NOT_MERGED, landed.note);
       return outcome("failed", landed.note);
@@ -477,6 +572,8 @@ const runFeatureTask = async (
     const note = `Factory error: ${messageOf(error)}`;
     await parkTask(ctx, ready.id, NOT_MERGED, note).catch(() => {});
     return outcome("failed", note);
+  } finally {
+    stopRenewing();
   }
 };
 

@@ -815,4 +815,128 @@ describe("runFactory, failures and retries", () => {
     );
     expect(tracker.issue("t-1").status).toBe("closed");
   }, 60_000);
+
+  it("keeps a task's claim alive while its agent runs", async () => {
+    let waitForHeartbeat: (id: string) => Promise<void> = async () => {};
+    const { tracker, run } = await setup([quickTask({ id: "t-1" })], {
+      heartbeatMs: 5,
+      agentScript: async (cwd) => {
+        // A long agent run: it outlasts at least one heartbeat interval.
+        const renewed = await within(5_000, waitForHeartbeat("t-1"));
+        if (!renewed) return result("blocked", "The claim was never renewed.");
+        return committingAgent(cwd);
+      },
+    });
+    waitForHeartbeat = tracker.nextHeartbeat;
+
+    const report = await run();
+
+    expect(report).toMatchObject({ taken: 1, accepted: 1 });
+    expect(tracker.issue("t-1").heartbeats).toBeGreaterThan(0);
+  }, 60_000);
+});
+
+/** Whether `promise` settles within `ms`. */
+const within = async (ms: number, promise: Promise<unknown>) => {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+  });
+  try {
+    return await Promise.race([promise.then(() => true), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/**
+ * Counts agents running at once. The first `limit` agents wait for each
+ * other, so a factory that can run `limit` at once must; a factory that
+ * runs fewer gives up waiting after a while and shows a lower `max`.
+ */
+const concurrencyGauge = (limit: number) => {
+  let active = 0;
+  let open = false;
+  let release: () => void = () => {};
+  const allArrived = new Promise<void>((resolve) => (release = resolve));
+  const gauge = {
+    max: 0,
+    /** Run `work` as one agent. */
+    run: async <T>(work: () => Promise<T>): Promise<T> => {
+      active++;
+      gauge.max = Math.max(gauge.max, active);
+      if (active >= limit) {
+        open = true;
+        release();
+      }
+      try {
+        if (!open) await within(5_000, allArrived);
+        return await work();
+      } finally {
+        active--;
+      }
+    },
+  };
+  return gauge;
+};
+
+describe("runFactory, in parallel", () => {
+  it("runs eligible tasks in parallel, never more than the limit at once", async () => {
+    const gauge = concurrencyGauge(2);
+    const { tracker, host, run } = await setup(
+      ["t-1", "t-2", "t-3", "t-4", "t-5"].map((id) => quickTask({ id })),
+      {
+        parallel: 2,
+        agentScript: (cwd) => gauge.run(() => committingAgent(cwd)),
+      },
+    );
+
+    const report = await run();
+
+    expect(gauge.max).toBe(2);
+    expect(report).toMatchObject({ taken: 5, accepted: 5, failed: 0 });
+    expect(host.pullRequests).toHaveLength(5);
+    for (const id of ["t-1", "t-2", "t-3", "t-4", "t-5"]) {
+      expect(tracker.issue(id).status).toBe("closed");
+    }
+  }, 60_000);
+
+  it("merges a spec's tasks into its integration branch one at a time, even when they finish together", async () => {
+    const ids = ["s-1.1", "s-1.2", "s-1.3", "s-1.4"];
+    const gauge = concurrencyGauge(ids.length);
+    const agent = featureAgent();
+    const { repoDir, tracker, run } = await setup(
+      [
+        spec({ id: "s-1" }),
+        ...ids.map((id) => featureTask({ id, parent: "s-1" })),
+      ],
+      {
+        parallel: ids.length,
+        checks: [],
+        agentScript: (cwd, prompt) =>
+          gauge.run(() => agent.script(cwd, prompt)),
+      },
+    );
+
+    const report = await run();
+
+    expect(gauge.max).toBe(ids.length);
+    expect(report).toMatchObject({ taken: 4, accepted: 4, failed: 0 });
+    for (const id of ids) expect(tracker.issue(id).status).toBe("closed");
+    // One merge commit per task, each on top of the one before.
+    const merges = (
+      await git(
+        repoDir,
+        "log",
+        "--first-parent",
+        "--merges",
+        "--format=%s",
+        "factory/s-1",
+      )
+    ).split("\n");
+    expect(merges).toHaveLength(ids.length);
+    expect(await subjects(repoDir, "factory/s-1")).toEqual(
+      expect.arrayContaining(ids.map((id) => `Implement ${id}`)),
+    );
+  }, 60_000);
 });

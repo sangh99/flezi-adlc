@@ -22,7 +22,7 @@ Run it from the repo root on the **host**, with every prerequisite below in plac
 `.sandcastle/factory/main.ts` lists the variables in its header comment and is the source of truth. Currently:
 
 - `FACTORY_BASE_BRANCH`: the branch work is cut from and pull requests target. Default `main`.
-- `FACTORY_PARALLEL`: how many items the factory builds at once (being added; check `main.ts` for its default).
+- `FACTORY_PARALLEL`: how many items the factory builds at once. Default 4. Merges into one integration branch still happen one at a time.
 
 ## What it takes
 
@@ -39,10 +39,12 @@ An item carrying `factory-failed` is skipped until a person removes that label. 
 ## What it produces
 
 - **Quick and Bugfix**: branch `factory/<id>` cut from the base branch, one pull request per task or bug. The factory closes the issue once the PR is open.
-- **Feature**: each task is built on `factory/<task-id>`, cut from the spec's integration branch `factory/<spec-id>`, and merged into it on the host; the factory then closes the task. Once every task of the spec is closed, a reviewer agent works over the integration branch and the factory opens one pull request for the whole spec, marking the spec `factory-pr-opened` so no later run opens a second.
+- **Feature**: each task is built on `factory/<task-id>`, cut from the spec's integration branch `factory/<spec-id>`, and merged into it on the host; the factory then closes the task. Once every task of the spec is closed, a reviewer agent works over the integration branch and the factory opens one pull request for the whole spec, marking the spec `factory-pr-opened` so no later run opens a second. A spec whose tasks all closed but whose PR step failed or never ran gets it on a later run. At the start of each run, the factory closes any spec whose pull request has merged.
 
-Work is accepted only if the agent reports done, made commits, and `npm run typecheck` and `npm test` pass in the sandbox.
+Work is accepted only if the agent reports done, made commits, and `npm run typecheck` and `npm test` pass in the sandbox. If a Feature task's merge into the integration branch conflicts, one merge agent tries to resolve it and the checks run again; a second failure fails the task.
+
+While an item runs, the factory renews its Beads claim every minute (`bd heartbeat`), so a long agent run keeps it.
 
 ## Recover from a failure
 
-When the factory gives up on an item, it comments the reason on the issue and adds `factory-failed`. Read the comment, fix the cause (edit the issue text, unblock it, resolve the conflict on the integration branch), then remove the label: `bd update <id> --remove-label factory-failed`. If the item is still `in_progress` from the factory's claim, set it back with `bd update <id> --status open`. The next run takes it again.
+When the factory gives up on an item, it comments the reason on the issue and adds `factory-failed`. It also releases its claim (`bd unclaim`), so the item is open again. Read the comment, fix the cause (edit the issue text, unblock it, resolve the conflict on the integration branch), then remove the label: `bd update <id> --remove-label factory-failed`. The next run takes it again, on a branch reset to its base, so nothing from the failed attempt carries over.

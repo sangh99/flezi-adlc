@@ -836,6 +836,78 @@ describe("runFactory, failures and retries", () => {
   }, 60_000);
 });
 
+describe("runFactory, spec lifecycle across runs", () => {
+  it("closes a spec at the start of the first run after its pull request is merged", async () => {
+    const agent = featureAgent();
+    const { tracker, host, run } = await setup(
+      [spec({ id: "s-1" }), featureTask({ id: "s-1.1", parent: "s-1" })],
+      { agentScript: agent.script, checks: [] },
+    );
+    await run();
+    const pr = host.pullRequests[0]!;
+    expect(tracker.issue("s-1").labels).toContain("factory-pr-opened");
+
+    // Not merged yet: the spec stays open.
+    await run();
+    expect(tracker.issue("s-1").status).toBe("open");
+
+    host.merge(pr.url);
+    const report = await run();
+
+    const closed = tracker.issue("s-1");
+    expect(closed.status).toBe("closed");
+    expect(closed.closeReason).toContain(pr.url);
+    expect(report.specs).toEqual([
+      expect.objectContaining({ specId: "s-1", status: "closed" }),
+    ]);
+    expect(report.pullRequests).toEqual([]);
+  }, 60_000);
+
+  it("opens a spec's pull request in a later run when its tasks closed in an earlier one", async () => {
+    const agent = featureAgent();
+    const closedTask = {
+      status: "closed",
+      closeReason: "Merged into factory/s-1",
+    };
+    const { repoDir, tracker, host, run } = await setup(
+      [
+        // An earlier run merged both tasks, then stopped before the PR step.
+        spec({ id: "s-1" }),
+        featureTask({ id: "s-1.1", parent: "s-1", ...closedTask }),
+        // An earlier review of s-2 failed: parked until a person says retry.
+        spec({
+          id: "s-2",
+          labels: ["spec-approved", "ready-for-agent", "factory-failed"],
+        }),
+        featureTask({ id: "s-2.1", parent: "s-2", ...closedTask }),
+      ],
+      { agentScript: agent.script, checks: [] },
+    );
+    await commitOnBranch(repoDir, "factory/s-1", "README.md", "s-1.1 landed\n");
+
+    const report = await run();
+
+    expect(agent.calls.map((c) => `${c.role} ${c.id}`)).toEqual(["review s-1"]);
+    expect(host.pullRequests).toHaveLength(1);
+    expect(host.pullRequests[0]).toMatchObject({ branch: "factory/s-1" });
+    expect(tracker.issue("s-1").labels).toContain("factory-pr-opened");
+    expect(report.specs).toEqual([
+      expect.objectContaining({ specId: "s-1", status: "pr-opened" }),
+    ]);
+
+    await tracker.tracker.removeLabel("s-2", "factory-failed");
+    await run();
+    expect(agent.calls.map((c) => `${c.role} ${c.id}`)).toEqual([
+      "review s-1",
+      "review s-2",
+    ]);
+    expect(host.pullRequests.map((pr) => pr.branch)).toEqual([
+      "factory/s-1",
+      "factory/s-2",
+    ]);
+  }, 60_000);
+});
+
 /** Whether `promise` settles within `ms`. */
 const within = async (ms: number, promise: Promise<unknown>) => {
   let timer: NodeJS.Timeout | undefined;

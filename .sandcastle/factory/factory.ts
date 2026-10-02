@@ -13,9 +13,15 @@
  *   the diagnosis in the bug body.
  * - Feature: a task under a spec that has passed the Spec and Task gates.
  *   Each task is built on its own branch cut from the spec's integration
- *   branch and merged back into it on the host. Once every task of the spec
- *   is closed, a reviewer agent works over the integration branch and the
- *   factory opens one pull request for the whole spec.
+ *   branch and merged back into it on the host, with one merge agent to
+ *   resolve a conflict. Once every task of the spec is closed, a reviewer
+ *   agent works over the integration branch and the factory opens one pull
+ *   request for the whole spec, then closes the spec in the first run after
+ *   that pull request is merged.
+ *
+ * Work runs in parallel, up to a limit, each piece in its own sandbox.
+ * Work the factory gives up on is parked with `factory-failed` and its
+ * claim released, until a person removes the label.
  *
  * The factory never writes the base branch or the host's checkout.
  */
@@ -51,6 +57,9 @@ export const LABELS = {
    */
   prOpened: "factory-pr-opened",
 } as const;
+
+/** Spec metadata key holding the URL of the pull request the factory opened. */
+export const PR_URL_KEY = "factory.pr";
 
 export interface FactoryOptions {
   readonly tracker: Tracker;
@@ -100,13 +109,18 @@ export interface TaskOutcome {
   readonly pullRequestUrl?: string;
 }
 
-/** What happened to a spec whose tasks were all closed during the run. */
+/**
+ * What happened to a spec in the run: its review and pull request once all
+ * its tasks were closed ("pr-opened" or "failed"), or its closing once that
+ * pull request was merged ("closed", or "failed" if closing it failed).
+ */
 export interface SpecOutcome {
   readonly specId: string;
   /** The integration branch: the pull request's head. */
   readonly branch: string;
-  readonly status: "pr-opened" | "failed";
+  readonly status: "pr-opened" | "closed" | "failed";
   readonly note: string;
+  /** Set when the run opened the spec's pull request. */
   readonly pullRequestUrl?: string;
 }
 
@@ -164,22 +178,20 @@ export const runFactory = async (
   options: FactoryOptions,
 ): Promise<FactoryReport> => {
   const ctx = resolveOptions(options);
+  const specs: SpecOutcome[] = [...(await closeMergedSpecs(ctx))];
 
   const outcomes: TaskOutcome[] = [];
-  /** Specs that gained work this run: candidates for their pull request. */
-  const landedSpecs = new Set<string>();
   await runAll(ctx, async (item) => {
-    if (item.workflow !== "feature") {
-      outcomes.push(await runOwnBranch(ctx, item.workflow, item.task));
-      return;
-    }
-    const outcome = await runFeatureTask(ctx, item.task, item.spec);
-    outcomes.push(outcome);
-    if (outcome.status === "accepted") landedSpecs.add(item.spec.id);
+    outcomes.push(
+      item.workflow === "feature"
+        ? await runFeatureTask(ctx, item.task, item.spec)
+        : await runOwnBranch(ctx, item.workflow, item.task),
+    );
   });
 
-  const specs: SpecOutcome[] = [];
-  for (const specId of landedSpecs) {
+  // Every spec due its pull request, whether its last task closed in this
+  // run or an earlier run stopped before the PR step.
+  for (const specId of await specsDueTheirPr(ctx)) {
     const outcome = await finishSpec(ctx, specId);
     if (outcome) specs.push(outcome);
   }
@@ -199,7 +211,7 @@ export const formatReport = (report: FactoryReport): string =>
     ),
     ...report.specs.map(
       (s) =>
-        `  ${s.status === "pr-opened" ? "+" : "x"} ${s.specId} (spec) ${s.pullRequestUrl ?? s.note}`,
+        `  ${s.status === "failed" ? "x" : "+"} ${s.specId} (spec) ${s.pullRequestUrl ?? s.note}`,
     ),
   ].join("\n");
 
@@ -680,6 +692,61 @@ const resolveConflicts = async (
 };
 
 /**
+ * Close every spec whose pull request the factory opened and the code host
+ * now reports merged: the spec's work has passed the merge gate.
+ */
+const closeMergedSpecs = async (ctx: Context): Promise<SpecOutcome[]> => {
+  const outcomes: SpecOutcome[] = [];
+  for (const spec of await ctx.tracker.listLabelled("epic", [
+    LABELS.prOpened,
+  ])) {
+    const url = spec.metadata[PR_URL_KEY];
+    if (!url) {
+      ctx.log(
+        `Spec ${spec.id} has ${LABELS.prOpened} but no ${PR_URL_KEY} metadata; close it by hand once its pull request is merged.`,
+      );
+      continue;
+    }
+    const outcome = (status: SpecOutcome["status"], note: string) => ({
+      specId: spec.id,
+      branch: integrationBranch(spec.id),
+      status,
+      note,
+    });
+    try {
+      if (!(await ctx.codeHost.isMerged(url))) continue;
+      await ctx.tracker.close(spec.id, `Pull request merged: ${url}`);
+      ctx.log(`Closed spec ${spec.id}: ${url} was merged.`);
+      outcomes.push(outcome("closed", `Pull request merged: ${url}`));
+    } catch (error) {
+      const note = `Could not close spec ${spec.id} after ${url}: ${messageOf(error)}`;
+      ctx.log(`  failed: ${note}`);
+      outcomes.push(outcome("failed", note));
+    }
+  }
+  return outcomes;
+};
+
+/**
+ * Specs that may be due their review and pull request: past both gates,
+ * with no pull request yet and not parked by an earlier failure.
+ * `finishSpec` checks that every task is closed.
+ */
+const specsDueTheirPr = async (ctx: Context): Promise<string[]> => {
+  const gated = await ctx.tracker.listLabelled("epic", [
+    LABELS.specApproved,
+    LABELS.readyForAgent,
+  ]);
+  return gated
+    .filter(
+      (spec) =>
+        !spec.labels.includes(LABELS.prOpened) &&
+        !spec.labels.includes(LABELS.factoryFailed),
+    )
+    .map((spec) => spec.id);
+};
+
+/**
  * Once every task of the spec is closed, review the integration branch,
  * re-run the required checks and open the spec's one pull request. Does
  * nothing while a task is still open, or if the pull request was opened
@@ -735,6 +802,8 @@ const finishSpec = async (
     });
     // Mark first, so a failure after this point can't lead to a second PR.
     await ctx.tracker.addLabel(specId, LABELS.prOpened);
+    // Read back by `closeMergedSpecs` in later runs.
+    await ctx.tracker.setMetadata(specId, PR_URL_KEY, url);
     await ctx.tracker.comment(specId, `Factory opened a pull request: ${url}`);
     return outcome("pr-opened", reviewed.note, url);
   } catch (error) {

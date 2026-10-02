@@ -13,6 +13,7 @@ interface BeadsIssueJson {
   readonly design?: string;
   readonly acceptance_criteria?: string;
   readonly notes?: string;
+  readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -53,6 +54,18 @@ export const beadsTracker = (options: {
       ]);
       return (issues as BeadsIssueJson[]).map(toTrackerIssue);
     },
+    listLabelled: async (type, labels) => {
+      // `bd list` leaves closed issues out unless asked for them.
+      const issues = await bdJson([
+        "list",
+        "--type",
+        type,
+        ...labels.flatMap((label) => ["--label", label]),
+        "--limit",
+        "0",
+      ]);
+      return (issues as BeadsIssueJson[]).map(toTrackerIssue);
+    },
     readIssue: async (id) => {
       const [issue] = (await bdJson(["show", id])) as BeadsIssueJson[];
       if (!issue) throw new Error(`bd show ${id} returned no issue`);
@@ -60,6 +73,14 @@ export const beadsTracker = (options: {
     },
     claim: async (id) => {
       await bd(["update", id, "--claim"]);
+    },
+    // A claim carries a lease (5 minutes in bd 1.3); `bd reclaim` hands an
+    // issue whose lease expired back to the ready list.
+    heartbeat: async (id) => {
+      await bd(["heartbeat", id]);
+    },
+    release: async (id) => {
+      await bd(["unclaim", id]);
     },
     comment: async (id, text) => {
       await bd(["comment", id, "--stdin"], text);
@@ -69,6 +90,9 @@ export const beadsTracker = (options: {
     },
     removeLabel: async (id, label) => {
       await bd(["update", id, "--remove-label", label]);
+    },
+    setMetadata: async (id, key, value) => {
+      await bd(["update", id, "--set-metadata", `${key}=${value}`]);
     },
     close: async (id, reason) => {
       await bd(["close", id, "--reason", reason]);
@@ -84,6 +108,12 @@ const toTrackerIssue = (issue: BeadsIssueJson): TrackerIssue => ({
   labels: issue.labels ?? [],
   parent: issue.parent || undefined,
   body: issueText(issue),
+  metadata: Object.fromEntries(
+    Object.entries(issue.metadata ?? {}).map(([key, value]) => [
+      key,
+      typeof value === "string" ? value : JSON.stringify(value),
+    ]),
+  ),
 });
 
 /** The description, followed by any of Beads' other text fields. */

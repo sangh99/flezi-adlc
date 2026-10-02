@@ -83,6 +83,34 @@ describe.skipIf(!hasBd)("beadsTracker against a real bd database", () => {
       "--silent",
     );
     await bd("dep", "add", ids.blocked, "--blocked-by", ids.blocker);
+    ids.held = await bd(
+      "create",
+      "A task to hold",
+      "--type",
+      "task",
+      "--silent",
+    );
+    const epic = async (title: string, labels: string) =>
+      bd("create", title, "--type", "epic", "--labels", labels, "--silent");
+    ids.prSpec = await epic(
+      "A spec with its PR",
+      "spec-approved,ready-for-agent,factory-pr-opened",
+    );
+    ids.gatedSpec = await epic("A gated spec", "spec-approved,ready-for-agent");
+    ids.closedPrSpec = await epic(
+      "A finished spec",
+      "spec-approved,ready-for-agent,factory-pr-opened",
+    );
+    await bd("close", ids.closedPrSpec, "--reason", "PR merged");
+    ids.prTask = await bd(
+      "create",
+      "A task labelled like a spec",
+      "--type",
+      "task",
+      "--labels",
+      "spec-approved,ready-for-agent,factory-pr-opened",
+      "--silent",
+    );
     tracker = beadsTracker({ cwd: dir });
   }, 60_000);
 
@@ -138,6 +166,56 @@ describe.skipIf(!hasBd)("beadsTracker against a real bd database", () => {
       parent: ids.spec,
     });
   }, 30_000);
+
+  it("lists open issues of a type carrying every given label", async () => {
+    const both = await tracker.listLabelled("epic", [
+      "spec-approved",
+      "ready-for-agent",
+    ]);
+    expect(both.map((i) => i.id).sort()).toEqual(
+      [ids.prSpec!, ids.gatedSpec!].sort(),
+    );
+
+    const withPr = await tracker.listLabelled("epic", ["factory-pr-opened"]);
+    expect(withPr.map((i) => i.id)).toEqual([ids.prSpec]);
+    expect(withPr[0]).toMatchObject({ type: "epic", status: "open" });
+  }, 30_000);
+
+  it("keeps metadata on an issue and reads it back in reads and lists", async () => {
+    await tracker.setMetadata(
+      ids.prSpec!,
+      "factory.pr",
+      "https://example.test/pr/7",
+    );
+    await tracker.setMetadata(ids.prSpec!, "other", "kept");
+
+    expect((await tracker.readIssue(ids.prSpec!)).metadata).toEqual({
+      "factory.pr": "https://example.test/pr/7",
+      other: "kept",
+    });
+    const [listed] = await tracker.listLabelled("epic", ["factory-pr-opened"]);
+    expect(listed?.metadata["factory.pr"]).toBe("https://example.test/pr/7");
+    expect((await tracker.readIssue(ids.gatedSpec!)).metadata).toEqual({});
+  }, 30_000);
+
+  it("renews a claim with a heartbeat, and releases it back to the ready list", async () => {
+    const id = ids.held!;
+    await expect(tracker.heartbeat(id)).rejects.toThrow();
+
+    await tracker.claim(id);
+    const leased = await showJson(id);
+    expect(leased.lease_expires_at).toBeTruthy();
+    await tracker.heartbeat(id);
+    expect((await showJson(id)).status).toBe("in_progress");
+
+    await tracker.release(id);
+    const released = await showJson(id);
+    expect(released.status).toBe("open");
+    expect(released.assignee ?? "").toBe("");
+    expect((await tracker.listReady()).map((i) => i.id)).toContain(id);
+    // A released claim can't be renewed: the factory learns it lost it.
+    await expect(tracker.heartbeat(id)).rejects.toThrow();
+  }, 60_000);
 
   it("claims, comments, labels and closes", async () => {
     const id = ids.quick!;

@@ -81,8 +81,8 @@ const featureTask = (overrides: Seed & { parent: string }): Seed => ({
 });
 
 interface AgentCall {
-  readonly role: "implement" | "review";
-  /** Task id (implement) or spec id (review). */
+  readonly role: "implement" | "review" | "merge";
+  /** Task id (implement, merge) or spec id (review). */
   readonly id: string;
   readonly prompt: string;
   /** Files in the sandbox repo when the agent started. */
@@ -91,7 +91,8 @@ interface AgentCall {
 
 /**
  * A scripted agent for Feature runs. As implementer it commits
- * `<task-id>.txt`; as reviewer it commits `review.txt` and returns a PR body.
+ * `<task-id>.txt`; as reviewer it commits `review.txt` and returns a PR body;
+ * as merge agent it runs `merge`, given the integration commit to merge.
  * `implement` overrides the implementer for chosen task ids. Every call is
  * recorded in `calls`.
  */
@@ -99,6 +100,7 @@ const featureAgent = (
   options: {
     implement?: Record<string, (cwd: string) => Promise<string>>;
     review?: (cwd: string) => Promise<string>;
+    merge?: (cwd: string, integrationCommit: string) => Promise<string>;
   } = {},
 ) => {
   const calls: AgentCall[] = [];
@@ -113,6 +115,15 @@ const featureAgent = (
       await git(cwd, "add", "-A");
       await git(cwd, "commit", "-m", `Implement ${task}`);
       return result("done", `Added ${task}.txt`);
+    }
+    const merging = /^Resolve the merge conflicts of task (\S+):/m.exec(
+      prompt,
+    )?.[1];
+    if (merging) {
+      calls.push({ role: "merge", id: merging, prompt, files });
+      const commit = /git merge --no-ff (\S+)/.exec(prompt)?.[1];
+      if (!options.merge || !commit) throw new Error("no merge script");
+      return options.merge(cwd, commit);
     }
     const reviewed = /^Review spec (\S+):/m.exec(prompt)?.[1];
     if (!reviewed) throw new Error(`unexpected prompt:\n${prompt}`);
@@ -152,6 +163,49 @@ const commitOnBranch = async (
   await writeFile(join(dir, file), content);
   await git(dir, "commit", "-am", `Change ${file} on ${branch}`);
   await git(repoDir, "worktree", "remove", dir);
+};
+
+/**
+ * An implementer for `taskId` of spec `s-1` that changes README.md, while
+ * another change to README.md lands on the integration branch as it works,
+ * so the task's merge back conflicts. Set `repoDir` before the run.
+ */
+const conflictingTask = (taskId: string) => {
+  const conflict = {
+    repoDir: "",
+    /** Where the integration branch was once the other change landed. */
+    integrationAfterMove: "",
+    implement: {
+      [taskId]: async (cwd: string) => {
+        await commitOnBranch(
+          conflict.repoDir,
+          "factory/s-1",
+          "README.md",
+          "integration\n",
+        );
+        conflict.integrationAfterMove = await git(
+          conflict.repoDir,
+          "rev-parse",
+          "factory/s-1",
+        );
+        await writeFile(join(cwd, "README.md"), "task\n");
+        await git(cwd, "commit", "-am", `Implement ${taskId}`);
+        return result("done", "Changed README.md");
+      },
+    },
+  };
+  return conflict;
+};
+
+/** Merge `commit` in `cwd`, settle README.md's conflict as `content`, commit. */
+const resolveMerge = async (cwd: string, commit: string, content: string) => {
+  // Exits non-zero on the conflict, which is the point.
+  await execFileAsync("git", ["merge", "--no-ff", commit], { cwd }).catch(
+    () => {},
+  );
+  await writeFile(join(cwd, "README.md"), content);
+  await git(cwd, "add", "README.md");
+  await git(cwd, "commit", "--no-edit");
 };
 
 /** The host checkout is still on `main`, at `sha`, with no tracked changes. */
@@ -367,30 +421,101 @@ describe("runFactory, Feature workflow", () => {
     expect(report).toMatchObject({ taken: 1, accepted: 0, failed: 1 });
   }, 60_000);
 
-  it("fails a task whose merge into the integration branch conflicts, leaving that branch as it was", async () => {
-    const agent = featureAgent();
+  it.each([
+    {
+      failure: "reports blocked",
+      expectNote: "Can't tell which README wins.",
+      merge: async () => result("blocked", "Can't tell which README wins."),
+    },
+    {
+      failure: "breaks the required checks",
+      expectNote: "test ! -f broken.txt",
+      merge: async (cwd: string, commit: string) => {
+        await resolveMerge(cwd, commit, "integration and task\n");
+        await writeFile(join(cwd, "broken.txt"), "oops\n");
+        await git(cwd, "add", "-A");
+        await git(cwd, "commit", "-m", "Break the build");
+        return result("done", "Merged.");
+      },
+    },
+    {
+      failure: "leaves the branch conflicting",
+      expectNote: "README.md",
+      merge: async (cwd: string) => {
+        await writeFile(join(cwd, "README.md"), "still only the task\n");
+        await git(cwd, "commit", "-am", "Not a merge");
+        return result("done", "Merged.");
+      },
+    },
+  ])(
+    "fails a conflicting task after one merge agent that $failure, leaving the integration branch as it was",
+    async ({ expectNote, merge }) => {
+      const conflict = conflictingTask("s-1.1");
+      const agent = featureAgent({ implement: conflict.implement, merge });
+      const { repoDir, baseSha, tracker, run } = await setup(
+        [spec({ id: "s-1" }), featureTask({ id: "s-1.1", parent: "s-1" })],
+        { agentScript: agent.script, checks: ["test ! -f broken.txt"] },
+      );
+      conflict.repoDir = repoDir;
+
+      const report = await run();
+
+      expect(agent.calls.map((c) => `${c.role} ${c.id}`)).toEqual([
+        "implement s-1.1",
+        "merge s-1.1",
+      ]);
+      expect(await git(repoDir, "rev-parse", "factory/s-1")).toBe(
+        conflict.integrationAfterMove,
+      );
+      const task = tracker.issue("s-1.1");
+      expect(task).toMatchObject({ status: "open", assignee: undefined });
+      expect(task.labels).toContain("factory-failed");
+      expect(task.comments.join("\n")).toMatch(/conflict/i);
+      expect(task.comments.join("\n")).toContain(expectNote);
+      await expectHostUntouched(repoDir, baseSha);
+      expect(report).toMatchObject({ taken: 1, accepted: 0, failed: 1 });
+    },
+    60_000,
+  );
+
+  it("lands a conflicting task once the merge agent resolves the conflict and the checks pass again", async () => {
+    const conflict = conflictingTask("s-1.1");
+    const agent = featureAgent({
+      implement: conflict.implement,
+      merge: async (cwd, commit) => {
+        await resolveMerge(cwd, commit, "integration and task\n");
+        return result("done", "Kept both README lines.");
+      },
+    });
     const { repoDir, baseSha, tracker, run } = await setup(
       [spec({ id: "s-1" }), featureTask({ id: "s-1.1", parent: "s-1" })],
-      { agentScript: agent.script, checks: [] },
+      { agentScript: agent.script, checks: ["grep -q task README.md"] },
     );
-    // An earlier run left the integration branch and a stale task branch
-    // that disagree about README.md.
-    await commitOnBranch(repoDir, "factory/s-1", "README.md", "integration\n");
-    await commitOnBranch(repoDir, "factory/s-1.1", "README.md", "stale\n");
-    const integrationBefore = await git(repoDir, "rev-parse", "factory/s-1");
+    conflict.repoDir = repoDir;
 
     const report = await run();
 
-    expect(await git(repoDir, "rev-parse", "factory/s-1")).toBe(
-      integrationBefore,
+    // The spec's review follows, since its only task closed.
+    expect(agent.calls.map((c) => `${c.role} ${c.id}`)).toEqual([
+      "implement s-1.1",
+      "merge s-1.1",
+      "review s-1",
+    ]);
+    const merge = agent.calls[1]!;
+    expect(merge.prompt).toContain(conflict.integrationAfterMove);
+    expect(merge.prompt).toContain("README.md");
+    expect(await git(repoDir, "show", "factory/s-1:README.md")).toBe(
+      "integration and task",
     );
-    const task = tracker.issue("s-1.1");
-    expect(task.status).not.toBe("closed");
-    expect(task.labels).toContain("factory-failed");
-    expect(task.comments.join("\n")).toMatch(/conflict/i);
-    expect(task.comments.join("\n")).toContain("README.md");
+    expect(await subjects(repoDir, "factory/s-1")).toEqual(
+      expect.arrayContaining([
+        "Implement s-1.1",
+        "Change README.md on factory/s-1",
+      ]),
+    );
+    expect(tracker.issue("s-1.1").status).toBe("closed");
     await expectHostUntouched(repoDir, baseSha);
-    expect(report).toMatchObject({ taken: 1, accepted: 0, failed: 1 });
+    expect(report).toMatchObject({ taken: 1, accepted: 1, failed: 0 });
   }, 60_000);
 
   it("opens one pull request per spec, after all its tasks close and a review pass, and never a second", async () => {
@@ -643,5 +768,51 @@ describe("runFactory, Bugfix workflow", () => {
     expect(await git(repoDir, "branch", "--list", "factory/s-1")).toBe("");
     expect(tracker.issue("b-1").status).toBe("closed");
     expect(report.outcomes[0]).toMatchObject({ workflow: "bugfix" });
+  }, 60_000);
+});
+
+describe("runFactory, failures and retries", () => {
+  it("parks a failed task until a person removes factory-failed, then retries it from a fresh branch", async () => {
+    const attempts: { files: readonly string[] }[] = [];
+    const { repoDir, tracker, host, run } = await setup(
+      [quickTask({ id: "t-1" })],
+      {
+        agentScript: async (cwd) => {
+          attempts.push({ files: (await git(cwd, "ls-files")).split("\n") });
+          if (attempts.length === 1) {
+            await writeFile(join(cwd, "first-attempt.txt"), "half done\n");
+            await git(cwd, "add", "-A");
+            await git(cwd, "commit", "-m", "A first attempt");
+            return result("blocked", "Stuck on the first attempt.");
+          }
+          return committingAgent(cwd);
+        },
+      },
+    );
+
+    const first = await run();
+
+    expect(first).toMatchObject({ taken: 1, failed: 1 });
+    const parked = tracker.issue("t-1");
+    expect(parked.labels).toContain("factory-failed");
+    expect(parked.comments.join("\n")).toContain("Stuck on the first attempt.");
+    // The claim is given back: open, with nobody holding it.
+    expect(parked).toMatchObject({ status: "open", assignee: undefined });
+
+    const skipped = await run();
+    expect(skipped).toMatchObject({ taken: 0 });
+    expect(attempts).toHaveLength(1);
+
+    await tracker.tracker.removeLabel("t-1", "factory-failed");
+    const retried = await run();
+
+    expect(retried).toMatchObject({ taken: 1, accepted: 1 });
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]!.files).not.toContain("first-attempt.txt");
+    const pr = host.pullRequests[0]!;
+    expect(await subjects(repoDir, pr.headSha)).not.toContain(
+      "A first attempt",
+    );
+    expect(tracker.issue("t-1").status).toBe("closed");
   }, 60_000);
 });

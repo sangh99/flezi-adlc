@@ -3,6 +3,8 @@
  * working tree: they only write objects and move branch refs, so the host's
  * checked-out branch and files never change.
  */
+import { realpath } from "node:fs/promises";
+import { isAbsolute, join, relative } from "node:path";
 import { execHost, spawnHost } from "./host-exec.js";
 
 const git = async (
@@ -34,9 +36,42 @@ export const ensureBranch = async (
   await git(repoDir, ["branch", "--no-track", branch, from]);
 };
 
+/**
+ * Point `branch` at `from`, creating it if needed, so work on it starts
+ * fresh: whatever an earlier attempt left on it is dropped. A worktree
+ * Sandcastle left behind on the branch (under `.sandcastle/worktrees/`) is
+ * removed first, since Sandcastle would otherwise reuse it. Refuses if any
+ * other worktree has the branch checked out.
+ */
+export const freshBranch = async (
+  repoDir: string,
+  branch: string,
+  from: string,
+): Promise<void> => {
+  const checkedOut = await worktreeWithBranch(repoDir, branch);
+  if (checkedOut) {
+    // git prints real paths; compare real paths on both sides.
+    const real = (path: string) => realpath(path).catch(() => path);
+    const managed = await real(join(repoDir, ".sandcastle", "worktrees"));
+    const rel = relative(managed, await real(checkedOut));
+    if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+      throw new Error(
+        `Branch ${branch} is checked out at ${checkedOut}; the factory won't reset a checked-out branch.`,
+      );
+    }
+    await git(repoDir, ["worktree", "remove", "--force", checkedOut]);
+  }
+  await git(repoDir, ["branch", "--force", "--no-track", branch, from]);
+};
+
 export type MergeResult =
   | { readonly ok: true; readonly sha: string }
-  | { readonly ok: false; readonly conflicts: readonly string[] };
+  | {
+      readonly ok: false;
+      readonly conflicts: readonly string[];
+      /** The commit of `into` the merge was tried against. */
+      readonly intoSha: string;
+    };
 
 /**
  * Merge branch `from` into branch `into` with a merge commit, without a
@@ -80,7 +115,7 @@ export const mergeBranch = async (
   const [tree = "", ...conflicts] = merged.stdout.trim().split("\n");
   // merge-tree exits 1 on a conflict and with other codes on errors.
   if (merged.exitCode === 1) {
-    return { ok: false, conflicts: conflicts.filter(Boolean) };
+    return { ok: false, conflicts: conflicts.filter(Boolean), intoSha };
   }
   if (merged.exitCode !== 0) {
     throw new Error(

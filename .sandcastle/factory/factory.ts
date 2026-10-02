@@ -32,7 +32,7 @@ import {
 } from "../../src/index.js";
 import { docker } from "../../src/sandboxes/docker.js";
 import type { CodeHost } from "./code-host.js";
-import { ensureBranch, mergeBranch } from "./host-git.js";
+import { ensureBranch, freshBranch, mergeBranch } from "./host-git.js";
 import type { Tracker, TrackerIssue } from "./tracker.js";
 
 export const LABELS = {
@@ -139,6 +139,9 @@ const FEATURE_PROMPT = fileURLToPath(
 const REVIEW_PROMPT = fileURLToPath(
   new URL("./review-prompt.md", import.meta.url),
 );
+const MERGE_PROMPT = fileURLToPath(
+  new URL("./merge-prompt.md", import.meta.url),
+);
 
 /** Branch a task is built on. */
 const taskBranch = (taskId: string) => `factory/${taskId}`;
@@ -232,6 +235,8 @@ const findWork = async (tracker: Tracker): Promise<WorkItem[]> => {
 
   const work: WorkItem[] = [];
   for (const task of ready) {
+    // Parked by an earlier run until a person removes the label.
+    if (task.labels.includes(LABELS.factoryFailed)) continue;
     if (task.type === "bug") {
       // A bug passes its own Diagnosis gate, so it is a Bugfix item even
       // when filed under a spec: its parent's labels don't matter.
@@ -382,7 +387,7 @@ const runOwnBranch = async (
       promptArgs: kind.promptArgs(task, ctx.baseBranch),
     });
     if (!built.ok) {
-      await recordFailure(ctx, task.id, NO_PR, built.note);
+      await parkTask(ctx, task.id, NO_PR, built.note);
       return outcome("failed", built.note);
     }
 
@@ -402,7 +407,7 @@ const runOwnBranch = async (
     const note = url
       ? `Pull request ${url} was opened, then the factory failed: ${messageOf(error)}`
       : `Factory error: ${messageOf(error)}`;
-    await recordFailure(ctx, ready.id, NO_PR, note).catch(() => {});
+    await parkTask(ctx, ready.id, NO_PR, note).catch(() => {});
     return outcome("failed", note, url);
   }
 };
@@ -456,13 +461,13 @@ const runFeatureTask = async (
       },
     });
     if (!built.ok) {
-      await recordFailure(ctx, task.id, NOT_MERGED, built.note);
+      await parkTask(ctx, task.id, NOT_MERGED, built.note);
       return outcome("failed", built.note);
     }
 
-    const landed = await land(ctx, { task, branch, integration });
+    const landed = await land(ctx, { task, spec, branch, integration });
     if (!landed.ok) {
-      await recordFailure(ctx, task.id, NOT_MERGED, landed.note);
+      await parkTask(ctx, task.id, NOT_MERGED, landed.note);
       return outcome("failed", landed.note);
     }
 
@@ -470,42 +475,111 @@ const runFeatureTask = async (
     return outcome("accepted", built.note);
   } catch (error) {
     const note = `Factory error: ${messageOf(error)}`;
-    await recordFailure(ctx, ready.id, NOT_MERGED, note).catch(() => {});
+    await parkTask(ctx, ready.id, NOT_MERGED, note).catch(() => {});
     return outcome("failed", note);
   }
 };
 
 /**
  * Merge an accepted task branch into the integration branch on the host.
- * Merges are sequential: the caller lands one task before taking the next.
- * A conflict fails the task and leaves the integration branch where it was.
+ * On a conflict, one merge agent merges the integration branch into the
+ * task branch and resolves it, the required checks run again, and the merge
+ * is tried once more. A second failure fails the task and leaves the
+ * integration branch where it was.
  */
 const land = async (
   ctx: Context,
   job: {
     readonly task: TrackerIssue;
+    readonly spec: TrackerIssue;
     readonly branch: string;
     readonly integration: string;
   },
-): Promise<{ ok: true } | { ok: false; note: string }> => {
+): Promise<{ ok: true } | BuildFailure> => {
   const { task, branch, integration } = job;
-  const merged = await mergeBranch(ctx.repoDir, {
-    into: integration,
-    from: branch,
-    message: `Merge ${branch} into ${integration}\n\n${task.id}: ${task.title}`,
-  });
-  if (merged.ok) return { ok: true };
-  // bd-ht5.4: give one merge agent a chance to resolve the conflict on the
-  // task branch here, then retry the merge, before giving up.
+  const merge = () =>
+    mergeBranch(ctx.repoDir, {
+      into: integration,
+      from: branch,
+      message: `Merge ${branch} into ${integration}\n\n${task.id}: ${task.title}`,
+    });
+  const conflictNote = (conflicts: readonly string[], after?: string) =>
+    [
+      `Merging ${branch} into ${integration} conflicts in:`,
+      ...conflicts.map((file) => `- ${file}`),
+      "",
+      ...(after ? [after, ""] : []),
+      `${integration} was left as it was.`,
+    ].join("\n");
+
+  const first = await merge();
+  if (first.ok) return { ok: true };
+
+  ctx.log(`  ${branch} conflicts with ${integration}: running a merge agent`);
+  const resolved = await resolveConflicts(ctx, job, first);
+  if (!resolved.ok) {
+    return { ok: false, note: conflictNote(first.conflicts, resolved.note) };
+  }
+  const second = await merge();
+  if (second.ok) return { ok: true };
   return {
     ok: false,
-    note: [
-      `Merging ${branch} into ${integration} conflicts in:`,
-      ...merged.conflicts.map((file) => `- ${file}`),
-      "",
-      `${integration} was left as it was.`,
-    ].join("\n"),
+    note: conflictNote(
+      second.conflicts,
+      `It still conflicts after the merge agent: ${resolved.note}`,
+    ),
   };
+};
+
+/**
+ * Run the merge agent on the task branch, to merge the integration branch
+ * in at the commit that conflicted, then the required checks there.
+ */
+const resolveConflicts = async (
+  ctx: Context,
+  job: {
+    readonly task: TrackerIssue;
+    readonly spec: TrackerIssue;
+    readonly branch: string;
+    readonly integration: string;
+  },
+  conflict: { readonly conflicts: readonly string[]; readonly intoSha: string },
+): Promise<BuildResult> => {
+  const { task, spec, branch, integration } = job;
+  await using sandbox = await openSandbox(ctx, branch, integration);
+  const run = await sandbox.run({
+    name: `Merge agent ${task.id}`,
+    agent: ctx.agent,
+    promptFile: MERGE_PROMPT,
+    promptArgs: {
+      TASK_ID: task.id,
+      TASK_TITLE: task.title,
+      TASK_BODY: task.body,
+      SPEC_ID: spec.id,
+      SPEC_TITLE: spec.title,
+      INTEGRATION_BRANCH: integration,
+      INTEGRATION_COMMIT: conflict.intoSha,
+      CONFLICTS: conflict.conflicts.map((file) => `- ${file}`).join("\n"),
+    },
+  });
+
+  const result = await readAgentResult(run.stdout, agentResult);
+  if (!result) {
+    return {
+      ok: false,
+      note: "The merge agent ended without a valid result block.",
+    };
+  }
+  if (result.status === "blocked") {
+    return {
+      ok: false,
+      note: `The merge agent reported blocked: ${result.note}`,
+    };
+  }
+
+  const failed = await runChecks(ctx, sandbox);
+  if (failed) return { ok: false, note: `After the merge agent: ${failed}` };
+  return { ok: true, note: result.note };
 };
 
 /**
@@ -632,8 +706,8 @@ type BuildFailure = { ok: false; note: string };
 type BuildResult = { ok: true; note: string } | BuildFailure;
 
 /**
- * Run the implementer in a sandbox on `branch` (cut from `baseBranch` if it
- * doesn't exist yet), then the required checks there.
+ * Run the implementer in a sandbox on `branch`, freshly cut from
+ * `baseBranch`, then the required checks there.
  */
 const build = async (
   ctx: Context,
@@ -645,6 +719,9 @@ const build = async (
     readonly promptArgs: Record<string, string>;
   },
 ): Promise<BuildResult> => {
+  // Sandcastle reuses an existing branch as it is, so a retry would build on
+  // a failed attempt's commits. Every attempt starts from the base instead.
+  await freshBranch(ctx.repoDir, job.branch, job.baseBranch);
   await using sandbox = await openSandbox(ctx, job.branch, job.baseBranch);
 
   const run = await sandbox.run({
@@ -750,6 +827,21 @@ const recordFailure = async (
   ctx.log(`  failed: ${note.split("\n")[0]}`);
   await ctx.tracker.comment(id, `${headline}\n\n${note}`);
   await ctx.tracker.addLabel(id, LABELS.factoryFailed);
+};
+
+/**
+ * Park a task the factory claimed and gave up on: record why, mark it
+ * `factory-failed`, then give the claim back. Labelled before it is open
+ * again, so no run sees it ready without the label.
+ */
+const parkTask = async (
+  ctx: Context,
+  id: string,
+  headline: string,
+  note: string,
+) => {
+  await recordFailure(ctx, id, headline, note);
+  await ctx.tracker.release(id);
 };
 
 const summarise = (

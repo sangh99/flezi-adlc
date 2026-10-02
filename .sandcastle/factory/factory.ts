@@ -4,10 +4,13 @@
  * merge gate. One call to `runFactory` is one pass over the backlog; it runs
  * to completion and returns a report.
  *
- * Two workflows are implemented:
+ * Three workflows are implemented:
  *
  * - Quick: a parentless task carrying `ready-for-agent`, built on its own
  *   branch cut from the base branch, with its own pull request.
+ * - Bugfix: a bug carrying `ready-for-agent` (the Diagnosis gate), with or
+ *   without a parent. Built like a Quick task, regression test first, from
+ *   the diagnosis in the bug body.
  * - Feature: a task under a spec that has passed the Spec and Task gates.
  *   Each task is built on its own branch cut from the spec's integration
  *   branch and merged back into it on the host. Once every task of the spec
@@ -74,7 +77,7 @@ export interface FactoryOptions {
   readonly log?: (line: string) => void;
 }
 
-export type Workflow = "quick" | "feature";
+export type Workflow = "quick" | "feature" | "bugfix";
 
 export interface TaskOutcome {
   readonly taskId: string;
@@ -127,6 +130,9 @@ export const reviewResult = Output.object({
 const IMPLEMENT_PROMPT = fileURLToPath(
   new URL("./implement-prompt.md", import.meta.url),
 );
+const BUGFIX_PROMPT = fileURLToPath(
+  new URL("./bugfix-prompt.md", import.meta.url),
+);
 const FEATURE_PROMPT = fileURLToPath(
   new URL("./feature-prompt.md", import.meta.url),
 );
@@ -159,8 +165,8 @@ export const runFactory = async (
     const item = work.find((w) => !attempted.has(w.task.id));
     if (!item) break;
     attempted.add(item.task.id);
-    if (item.workflow === "quick") {
-      outcomes.push(await runQuick(ctx, item.task));
+    if (item.workflow !== "feature") {
+      outcomes.push(await runOwnBranch(ctx, item.workflow, item.task));
       continue;
     }
     const outcome = await runFeatureTask(ctx, item.task, item.spec);
@@ -197,8 +203,11 @@ export const formatReport = (report: FactoryReport): string =>
 // Eligibility
 // ---------------------------------------------------------------------------
 
+/** Workflows whose work is built on its own branch, with its own PR. */
+type OwnBranchWorkflow = "quick" | "bugfix";
+
 type WorkItem =
-  | { readonly workflow: "quick"; readonly task: TrackerIssue }
+  | { readonly workflow: OwnBranchWorkflow; readonly task: TrackerIssue }
   | {
       readonly workflow: "feature";
       readonly task: TrackerIssue;
@@ -223,6 +232,14 @@ const findWork = async (tracker: Tracker): Promise<WorkItem[]> => {
 
   const work: WorkItem[] = [];
   for (const task of ready) {
+    if (task.type === "bug") {
+      // A bug passes its own Diagnosis gate, so it is a Bugfix item even
+      // when filed under a spec: its parent's labels don't matter.
+      if (task.labels.includes(LABELS.readyForAgent)) {
+        work.push({ workflow: "bugfix", task });
+      }
+      continue;
+    }
     if (task.type !== "task") continue;
     if (task.parent === undefined) {
       if (task.labels.includes(LABELS.readyForAgent)) {
@@ -239,7 +256,6 @@ const findWork = async (tracker: Tracker): Promise<WorkItem[]> => {
       work.push({ workflow: "feature", task, spec });
     }
   }
-  // Bugfix (a bug with ready-for-agent) is not implemented yet.
   return work;
 };
 
@@ -265,13 +281,74 @@ const resolveOptions = (options: FactoryOptions): Context => ({
 });
 
 // ---------------------------------------------------------------------------
-// Quick workflow
+// Quick and Bugfix workflows
 // ---------------------------------------------------------------------------
 
-const runQuick = async (
+/** How a Quick task or a bug is put to the implementer and described. */
+interface OwnBranchKind {
+  readonly promptFile: string;
+  readonly promptArgs: (
+    issue: TrackerIssue,
+    baseBranch: string,
+  ) => Record<string, string>;
+  /** The pull request body's opening lines. */
+  readonly prIntro: (issue: TrackerIssue) => readonly string[];
+}
+
+const OWN_BRANCH: Record<OwnBranchWorkflow, OwnBranchKind> = {
+  quick: {
+    promptFile: IMPLEMENT_PROMPT,
+    promptArgs: (task, baseBranch) => ({
+      TASK_ID: task.id,
+      TASK_TITLE: task.title,
+      TASK_BODY: task.body,
+      BASE_BRANCH: baseBranch,
+    }),
+    prIntro: (task) => [`Implements Beads task \`${task.id}\`.`],
+  },
+  bugfix: {
+    promptFile: BUGFIX_PROMPT,
+    promptArgs: (bug, baseBranch) => ({
+      BUG_ID: bug.id,
+      BUG_TITLE: bug.title,
+      BUG_BODY: bug.body,
+      BASE_BRANCH: baseBranch,
+    }),
+    prIntro: (bug) => {
+      const rootCause = markdownSection(bug.body, "Root Cause");
+      return [
+        `Fixes Beads bug \`${bug.id}\`.`,
+        ...(rootCause
+          ? ["", "Root cause, from the diagnosis:", "", rootCause]
+          : []),
+      ];
+    },
+  },
+};
+
+/** The text under `## <heading>` in `body`, up to the next `##` heading. */
+const markdownSection = (body: string, heading: string): string | undefined => {
+  const lines = body.split("\n");
+  const start = lines.findIndex(
+    (line) => line.trim().toLowerCase() === `## ${heading.toLowerCase()}`,
+  );
+  if (start === -1) return undefined;
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((line) => /^#{1,2} /.test(line));
+  const text = (end === -1 ? rest : rest.slice(0, end)).join("\n").trim();
+  return text || undefined;
+};
+
+/**
+ * Build a Quick task or a bug on its own branch cut from the base branch,
+ * then push it, open its pull request and close the issue.
+ */
+const runOwnBranch = async (
   ctx: Context,
+  workflow: OwnBranchWorkflow,
   ready: TrackerIssue,
 ): Promise<TaskOutcome> => {
+  const kind = OWN_BRANCH[workflow];
   const branch = taskBranch(ready.id);
   const outcome = (
     status: TaskOutcome["status"],
@@ -279,7 +356,7 @@ const runQuick = async (
     pullRequestUrl?: string,
   ): TaskOutcome => ({
     taskId: ready.id,
-    workflow: "quick",
+    workflow,
     branch,
     status,
     note,
@@ -301,13 +378,8 @@ const runQuick = async (
       branch,
       baseBranch: ctx.baseBranch,
       name: `Implementer ${task.id}`,
-      promptFile: IMPLEMENT_PROMPT,
-      promptArgs: {
-        TASK_ID: task.id,
-        TASK_TITLE: task.title,
-        TASK_BODY: task.body,
-        BASE_BRANCH: ctx.baseBranch,
-      },
+      promptFile: kind.promptFile,
+      promptArgs: kind.promptArgs(task, ctx.baseBranch),
     });
     if (!built.ok) {
       await recordFailure(ctx, task.id, NO_PR, built.note);
@@ -319,13 +391,9 @@ const runQuick = async (
       branch,
       base: ctx.baseBranch,
       title: task.title,
-      body: [
-        `Implements Beads task \`${task.id}\`.`,
-        "",
-        built.note,
-        "",
-        checksLine(ctx),
-      ].join("\n"),
+      body: [...kind.prIntro(task), "", built.note, "", checksLine(ctx)].join(
+        "\n",
+      ),
     });
     await ctx.tracker.comment(task.id, `Factory opened a pull request: ${url}`);
     await ctx.tracker.close(task.id, `Pull request opened: ${url}`);

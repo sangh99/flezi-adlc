@@ -514,3 +514,134 @@ describe("runFactory, Feature workflow", () => {
     expect(await git(repoDir, "branch", "--list", "factory/*")).toBe("");
   }, 60_000);
 });
+
+const FAILING_COMMAND =
+  "npx vitest run src/parse.test.ts -t 'drops the trailing newline'";
+const ROOT_CAUSE = "parseLines splits on newlines and keeps the empty tail.";
+
+/** A bug that has been diagnosed and has passed the Diagnosis gate. */
+const bug = (overrides: Seed): Seed => ({
+  title: "Parser returns a trailing empty line",
+  type: "bug",
+  labels: ["ready-for-agent"],
+  body: [
+    "## Symptom\nparseLines on 'a' plus a newline returns two lines.",
+    `## Steps to Reproduce\n\`${FAILING_COMMAND}\`\n\nexpected 1 line, got 2`,
+    `## Root Cause\n${ROOT_CAUSE}`,
+    "## Fix Approach\nDrop the empty tail in parseLines.",
+    "## Testing\nsrc/parse.test.ts, through parseLines.",
+    "## Acceptance Criteria\n- [ ] The command goes green",
+  ].join("\n\n"),
+  ...overrides,
+});
+
+/**
+ * A scripted implementer for Bugfix runs: commits `fix.txt` and records the
+ * prompt of every bug it is asked to fix.
+ */
+const bugfixAgent = () => {
+  const calls: { id: string; prompt: string }[] = [];
+  const script = async (cwd: string, prompt: string): Promise<string> => {
+    const id = /^Fix bug (\S+):/m.exec(prompt)?.[1];
+    if (!id) throw new Error(`unexpected prompt:\n${prompt}`);
+    calls.push({ id, prompt });
+    await writeFile(join(cwd, "fix.txt"), `${id}\n`);
+    await git(cwd, "add", "-A");
+    await git(cwd, "commit", "-m", `Fix ${id}`);
+    return result("done", "Added a regression test and fixed parseLines.");
+  };
+  return { calls, script };
+};
+
+describe("runFactory, Bugfix workflow", () => {
+  it("takes a bug only once it has passed the Diagnosis gate", async () => {
+    const agent = bugfixAgent();
+    const { tracker, run } = await setup(
+      [bug({ id: "b-gated" }), bug({ id: "b-undiagnosed", labels: [] })],
+      { agentScript: agent.script, checks: ["test -f fix.txt"] },
+    );
+
+    const report = await run();
+
+    expect(agent.calls.map((c) => c.id)).toEqual(["b-gated"]);
+    expect(tracker.issue("b-undiagnosed")).toMatchObject({
+      status: "open",
+      comments: [],
+    });
+    expect(report.outcomes).toEqual([
+      expect.objectContaining({
+        taskId: "b-gated",
+        workflow: "bugfix",
+        status: "accepted",
+      }),
+    ]);
+  }, 60_000);
+
+  it("opens one pull request for an accepted bug, naming it and its root cause, and closes it", async () => {
+    const agent = bugfixAgent();
+    const { repoDir, baseSha, tracker, host, run } = await setup(
+      [bug({ id: "b-1" })],
+      { agentScript: agent.script, checks: ["test -f fix.txt"] },
+    );
+
+    const report = await run();
+
+    expect(host.pullRequests).toHaveLength(1);
+    const pr = host.pullRequests[0]!;
+    expect(pr.base).toBe("main");
+    expect(pr.branch).not.toBe("main");
+    expect(pr.body).toContain("b-1");
+    expect(pr.body).toContain(ROOT_CAUSE);
+    expect(await subjects(repoDir, pr.headSha)).toContain("Fix b-1");
+    await expectHostUntouched(repoDir, baseSha);
+
+    const issue = tracker.issue("b-1");
+    expect(issue.status).toBe("closed");
+    expect(issue.comments.join("\n")).toContain(pr.url);
+    expect(report).toMatchObject({
+      taken: 1,
+      accepted: 1,
+      failed: 0,
+      pullRequests: [pr.url],
+    });
+  }, 60_000);
+
+  it("gives the implementer the diagnosis and asks for the regression test before the fix", async () => {
+    const agent = bugfixAgent();
+    const { run } = await setup([bug({ id: "b-1" })], {
+      agentScript: agent.script,
+      checks: [],
+    });
+
+    await run();
+
+    const { prompt } = agent.calls[0]!;
+    expect(prompt).toContain(FAILING_COMMAND);
+    expect(prompt).toContain(ROOT_CAUSE);
+    expect(prompt).toContain("## Testing\nsrc/parse.test.ts");
+    const instructions = prompt.slice(prompt.indexOf("</bug>"));
+    expect(instructions).toMatch(
+      /regression test[^\n]*confirm it fails[\s\S]*fix the bug/i,
+    );
+    expect(instructions).toMatch(/no seam in Testing[\s\S]*report `blocked`/);
+  }, 60_000);
+
+  it("takes a diagnosed bug filed under a spec through its own gate, with its own pull request", async () => {
+    const agent = bugfixAgent();
+    const { repoDir, tracker, host, run } = await setup(
+      [spec({ id: "s-1", labels: [] }), bug({ id: "b-1", parent: "s-1" })],
+      { agentScript: agent.script, checks: ["test -f fix.txt"] },
+    );
+
+    const report = await run();
+
+    expect(host.pullRequests).toHaveLength(1);
+    expect(host.pullRequests[0]).toMatchObject({
+      branch: "factory/b-1",
+      base: "main",
+    });
+    expect(await git(repoDir, "branch", "--list", "factory/s-1")).toBe("");
+    expect(tracker.issue("b-1").status).toBe("closed");
+    expect(report.outcomes[0]).toMatchObject({ workflow: "bugfix" });
+  }, 60_000);
+});

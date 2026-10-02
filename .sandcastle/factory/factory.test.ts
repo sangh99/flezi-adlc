@@ -850,6 +850,39 @@ describe("runFactory, failures and retries", () => {
     expect(task.labels).toContain("factory-failed");
     expect(task).toMatchObject({ status: "open", assignee: undefined });
   }, 60_000);
+
+  it("lets work already running finish before failing when the ready list can't be read", async () => {
+    let listings = 0;
+    let listingFailed: () => void = () => {};
+    const secondListing = new Promise<void>((r) => (listingFailed = r));
+    const { tracker, run } = await setup(
+      [quickTask({ id: "t-1" }), quickTask({ id: "t-2" })],
+      {
+        parallel: 2,
+        agentScript: async (cwd, prompt) => {
+          // t-2 is still working when t-1 frees its slot.
+          if (prompt.includes("t-2")) await secondListing;
+          return committingAgent(cwd);
+        },
+      },
+    );
+    const listReady = tracker.tracker.listReady;
+    tracker.tracker.listReady = async () => {
+      if (++listings === 1) return listReady();
+      listingFailed();
+      throw new Error("bd ready failed");
+    };
+
+    const error = await run().then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+
+    expect(String(error)).toContain("bd ready failed");
+    // Nothing is left mid-flight or claimed once the run gives up.
+    expect(tracker.issue("t-1").status).toBe("closed");
+    expect(tracker.issue("t-2").status).toBe("closed");
+  }, 60_000);
 });
 
 describe("runFactory, spec lifecycle across runs", () => {

@@ -225,6 +225,8 @@ export const formatReport = (report: FactoryReport): string =>
  * unblocked by a Feature task closing earlier in the run is taken in this
  * run too. Each piece is attempted at most once per run, which also bounds
  * the loop. Ends once nothing is running and nothing new is eligible.
+ * If the ready list can't be read, no new work is taken: the work already
+ * running finishes (and releases its claims) before the error is rethrown.
  */
 const runAll = async (
   ctx: Context,
@@ -234,7 +236,14 @@ const runAll = async (
   const running = new Set<Promise<void>>();
   for (;;) {
     if (running.size < ctx.parallel) {
-      for (const item of await findWork(ctx.tracker)) {
+      let work: WorkItem[];
+      try {
+        work = await findWork(ctx.tracker);
+      } catch (error) {
+        await Promise.allSettled(running);
+        throw error;
+      }
+      for (const item of work) {
         if (running.size >= ctx.parallel) break;
         if (attempted.has(item.task.id)) continue;
         attempted.add(item.task.id);

@@ -170,5 +170,5 @@ For a new agent provider `foo`:
 - [ ] Public export from [`src/index.ts`](../../src/index.ts): the `foo` factory and the `FooOptions` type.
 - [ ] `AGENT_REGISTRY` entry in [`src/InitService.ts`](../../src/InitService.ts).
 - [ ] `FOO_DOCKERFILE` constant in `src/InitService.ts`.
-- [ ] Changeset in `.changeset/` (patch, since pre-1.0). See [`CLAUDE.md`](../../CLAUDE.md).
+- [ ] Changeset in `.changeset/` (patch, since pre-1.0). See [`AGENTS.md`](../../AGENTS.md).
 - [ ] `README.md` update if the public-facing list of supported agents is mentioned there.

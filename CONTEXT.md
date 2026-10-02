@@ -154,6 +154,10 @@ _Avoid_: "local hook"
 A lifecycle hook that runs inside the **sandbox** container. Sandbox hooks are `{ command: string; sudo?: boolean }`.
 _Avoid_: "container hook", "remote hook"
 
+**Agent hook**:
+A hook fired by the **agent**'s own harness on agent events (tool use, prompt submit, stop), as opposed to a Sandcastle lifecycle hook.
+_Avoid_: bare "hook" (ambiguous between **host hook**, **sandbox hook** and **agent hook**)
+
 ### Init
 
 **Init**:
@@ -215,3 +219,37 @@ _Avoid_: "stdout mode", "interactive mode", "CLI mode" (ambiguous with the CLI i
 **Agent stream event**:
 A single item in the **agent**'s output stream -- either a `text` chunk or a `toolCall` -- surfaced to the caller of `run()` so the stream can be forwarded to an external observability system. Available only in **log-to-file mode** via the `onAgentStreamEvent` callback on the `logging` option. Each event carries its `iteration` number and a `timestamp`.
 _Avoid_: "log event" (the log file contains more than just agent output), "display entry" (internal UI type)
+
+### ADLC
+
+**ADLC kit**:
+The agentic development lifecycle this repo packages for teams: the skills, the **factory**, and the team playbook, with Sandcastle as the engine underneath.
+_Avoid_: "the framework", "the process"
+
+**Factory**:
+The unattended system that implements approved work inside **sandboxes** and opens pull requests for human review. It only ever runs the implementation phase.
+_Avoid_: "pipeline", "RALPH", "sandbox factory" (that's a **sandbox provider**)
+
+**Approval gate**:
+A human sign-off that work must pass before it moves to the next phase. Anyone on the team can approve; gates are not tied to roles. Nothing reaches the **factory** without passing every gate before it.
+_Avoid_: "checkpoint" (Kiro uses this for undo), "review" (too broad)
+
+**Spec**:
+A Beads epic holding the agreed requirements and design that its **tasks** implement.
+_Avoid_: "PRD", "ticket", "epic" (that's the Beads type, not the concept)
+
+**Spec gate**:
+The **approval gate** on a **spec**'s requirements and design, passed before it is broken into **tasks**.
+
+**Task gate**:
+The **approval gate** on the set of **tasks** a **spec** breaks into, and on how they block each other. The last gate before the **factory**.
+
+**Merge gate**:
+The **approval gate** on a pull request the **factory** opens. The factory never merges to main itself.
+
+**Workflow**:
+One of the fixed paths a piece of work takes through the **ADLC kit**: Feature, Quick or Bugfix. Each one ends at the **merge gate**.
+_Avoid_: "flow", "mode" (Claude Code and Kiro both use it for something else). Not to be confused with the scripts in `.sandcastle/agent-workflows/`.
+
+**Diagnosis gate**:
+The **approval gate** in a bugfix, passed once a human and the **agent** have a reliably failing check for the bug and an agreed root cause, before the **factory** writes the fix.

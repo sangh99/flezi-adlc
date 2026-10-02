@@ -75,4 +75,4 @@ sync:
 # remote: "git+https://github.com/sangh99/flezi-adlc.git"
 lint:
     sections:
-        epic: Problem Statement, Solution, User Stories, Implementation Decisions, Testing Decisions
+        epic: Problem Statement, Solution, User Stories, Implementation Decisions, Testing Decisions, Acceptance Criteria

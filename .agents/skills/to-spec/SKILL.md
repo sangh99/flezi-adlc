@@ -64,6 +64,13 @@ A list of testing decisions that were made. Include:
 - Which modules will be tested
 - Prior art for the tests (i.e. similar types of tests in the codebase)
 
+## Acceptance Criteria
+
+A checklist of observable outcomes that must all hold for the spec to be done. Each one should be verifiable at the merge gate.
+
+- [ ] Criterion 1
+- [ ] Criterion 2
+
 ## Out of Scope
 
 A description of the things that are out of scope for this spec.

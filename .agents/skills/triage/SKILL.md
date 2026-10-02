@@ -49,8 +49,8 @@ State transitions: an unlabeled issue normally goes to `needs-triage` first; fro
 The maintainer invokes `/triage` and describes what they want in natural language. Interpret the request and act. Examples:
 
 - "Show me anything that needs my attention"
-- "Let's look at #42" (issue or PR)
-- "Move #42 to ready-for-agent"
+- "Let's look at bd-a3f8" (issue or PR)
+- "Move bd-a3f8 to ready-for-agent"
 - "What's ready for agents to pick up?"
 
 ## Show what needs attention
@@ -87,7 +87,7 @@ Show counts and a one-line summary per item. Let the maintainer pick.
 
 ## Quick state override
 
-If the maintainer says "move #42 to ready-for-agent", trust them and apply the role directly. Confirm what you're about to do (role changes, comment, close), then act. Skip grilling. If moving to `ready-for-agent` without a grilling session, ask whether they want to write an agent brief.
+If the maintainer says "move bd-a3f8 to ready-for-agent", trust them and apply the role directly. Confirm what you're about to do (role changes, comment, close), then act. Skip grilling. If moving to `ready-for-agent` without a grilling session, ask whether they want to write an agent brief.
 
 ## Needs-info template
 

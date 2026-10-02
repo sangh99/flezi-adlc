@@ -37,6 +37,8 @@ Each workflow starts from a person-only skill that stops at its approval gate an
 - **Quick**: [`/quick`](../../.agents/skills/quick/SKILL.md) writes one parentless task with its agreed test boundary (Task gate).
 - **Bugfix**: [`/bugfix`](../../.agents/skills/bugfix/SKILL.md) files or adopts a bug and diagnoses it until a command reliably fails on it (Diagnosis gate).
 
+Past its last gate, work goes to the [factory](factory.md), which builds it and opens the pull request for the merge gate.
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** Beads holds issues only; pull requests live on the code host and are not triaged.

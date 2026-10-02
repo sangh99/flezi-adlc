@@ -18,6 +18,10 @@ When changing public-facing behavior, check `README.md` to see if the documentat
 
 Issues and specs live in Beads (`bd` CLI, run on the host only). Pull requests stay on GitHub and are not a triage surface. See `docs/agents/issue-tracker.md`.
 
+### Factory
+
+Run the factory with `npm run factory`. Before starting it, or when work it took failed, read `docs/agents/factory.md`.
+
 ### Triage labels
 
 Default canonical labels. Agent provider support is detailed here. See `docs/agents/triage.md`.

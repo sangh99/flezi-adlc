@@ -16,7 +16,7 @@ The `package.json` scripts are the source of truth. Points that are easy to miss
 - `npm run typecheck` is the type check. CI does not run it (CI only builds and tests on pushes to `main`), so run it yourself.
 - `npm run build` also copies `src/templates/` into `dist/` and runs `scripts/check-public-types-effect-free.mjs`. That script fails the build if any `.d.ts` references `effect`.
 - `npm test` runs `src/**/*.test.ts`. These tests need git but no container runtime.
-- `npm run sandcastle`, `test-podman` and `test-interactive` run real agents in real containers. They need Docker or Podman plus `.sandcastle/.env`.
+- `npm run factory`, `test-podman` and `test-interactive` run real agents in real containers. They need Docker or Podman plus `.sandcastle/.env`. The factory also needs `bd` and `gh` on the host ([`docs/agents/factory.md`](../agents/factory.md)).
 - The pre-commit hook runs Prettier on staged files through `lint-staged`. Symlinks are skipped, and `.prettierignore` excludes `.agents/skills/` and `skills-lock.json`.
 - CI fails if a `CLAUDE.md` or `CLAUDE.local.md` exists anywhere, because either one stops Claude Code from reading `AGENTS.md`.
 

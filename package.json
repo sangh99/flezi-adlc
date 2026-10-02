@@ -40,7 +40,6 @@
     "format:check": "prettier --check .",
     "prepare": "husky",
     "release": "changeset publish",
-    "sandcastle": "npm run build && tsx .sandcastle/run.ts",
     "factory": "tsx .sandcastle/factory/main.ts",
     "test-podman": "npm run build && tsx --env-file=.sandcastle/.env .sandcastle/test-podman.ts",
     "test-interactive": "npm run build && tsx --env-file=.sandcastle/.env .sandcastle/test-interactive.ts"

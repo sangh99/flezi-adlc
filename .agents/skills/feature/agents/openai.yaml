@@ -1,0 +1,5 @@
+interface:
+  display_name: "Feature"
+  short_description: "Start or resume the Feature workflow"
+policy:
+  allow_implicit_invocation: false

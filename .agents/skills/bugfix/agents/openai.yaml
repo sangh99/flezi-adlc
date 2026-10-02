@@ -1,0 +1,5 @@
+interface:
+  display_name: "Bugfix"
+  short_description: "Diagnose a bug up to the Diagnosis gate"
+policy:
+  allow_implicit_invocation: false

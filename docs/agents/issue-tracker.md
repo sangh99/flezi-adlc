@@ -29,6 +29,14 @@ Gates are passed by a person, never by an agent. Anyone on the team can approve.
 
 When you pass a gate, also comment the snapshot you approved: `bd comment <id> "Approved: <gate>, <latest bd history ref>"`, taking the ref from `bd history <id> --limit 1`.
 
+## Workflows
+
+Each workflow starts from a person-only skill that stops at its approval gate and prints the commands for passing it.
+
+- **Feature**: [`/feature`](../../.agents/skills/feature/SKILL.md) grills an idea, then hands it to `/to-spec` (Spec gate) and `/to-tickets` (Task gate). `/feature <spec-id>` reports where an existing spec is and the next step.
+- **Quick**: [`/quick`](../../.agents/skills/quick/SKILL.md) writes one parentless task with its agreed test boundary (Task gate).
+- **Bugfix**: [`/bugfix`](../../.agents/skills/bugfix/SKILL.md) files or adopts a bug and diagnoses it until a command reliably fails on it (Diagnosis gate).
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** Beads holds issues only; pull requests live on the code host and are not triaged.

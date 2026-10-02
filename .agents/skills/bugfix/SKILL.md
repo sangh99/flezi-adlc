@@ -12,7 +12,7 @@ Beads conventions and the gate labels are in `docs/agents/issue-tracker.md`.
 
 ## 1. File or adopt the bug
 
-With a bug ID, read it with `bd show <id>` and `bd comments <id>`. If it already carries `ready-for-agent`, it is past the Diagnosis gate: say so and stop. If it is not a `bug`, say so and stop.
+With a bug ID, read it with `bd show <id>` and `bd comments <id>`. If it is not a `bug`, say so and stop. If it already carries `ready-for-agent` and has an `Approved: Diagnosis gate` comment, it is past the Diagnosis gate: say so and stop. If it carries `ready-for-agent` with no such comment, the label was most likely copied from its parent spec when the bug was filed, and the factory would take it undiagnosed: tell the person to remove it (`bd update <id> --remove-label ready-for-agent`) and stop.
 
 With no ID, file one holding what the person reported:
 

@@ -8,7 +8,7 @@ Run `bd` on the **host** only. Agents inside a sandbox never call `bd`; the orch
 
 - **Issue types**: a spec is an `epic`; implementation tickets are `task`s whose parent is the spec epic; bugs are `bug`s.
 - **Create an issue**: `bd create "<title>" --type <epic|task|bug> --body-file - --silent`, piping a heredoc as the body. `--silent` prints only the new ID.
-- **Create a child**: add `--parent <epic-id>`.
+- **Create a child**: add `--parent <epic-id>`. Beads copies the parent's labels onto a new child, gate labels included. Add `--no-inherit-labels` when filing a bug under a spec, or the bug arrives carrying the spec's `ready-for-agent` and the factory takes it before its Diagnosis gate.
 - **Read an issue**: `bd show <id>` for the body, labels and dependencies, and `bd comments <id>` for the comments.
 - **List issues**: `bd list --json` with filters such as `--type`, `--label`, `--status` and `--parent <epic-id>`. Use `--limit 0` so the full backlog is visible (the default is 50). Add `--all` to include closed issues.
 - **List unblocked work**: `bd ready --json --exclude-type epic`, optionally with `--parent <epic-id>` and `--label <label>`.

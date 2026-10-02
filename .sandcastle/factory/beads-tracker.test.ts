@@ -149,6 +149,31 @@ describe.skipIf(!hasBd)("beadsTracker against a real bd database", () => {
     expect(quick.body).toContain("The thing is done");
   }, 30_000);
 
+  it("reads the gate labels a child copied from its spec when it was filed, unless filed with --no-inherit-labels", async () => {
+    // Why the factory reads a Feature task's gates from its spec, and why a
+    // bug filed under a gated spec needs --no-inherit-labels: otherwise it
+    // arrives carrying ready-for-agent before its Diagnosis gate.
+    const file = (...flags: string[]) =>
+      bd(
+        "create",
+        "A bug under a gated spec",
+        "--type",
+        "bug",
+        "--parent",
+        ids.gatedSpec!,
+        ...flags,
+        "--silent",
+      );
+
+    const inherited = await tracker.readIssue(await file());
+    expect(inherited.labels).toEqual(
+      expect.arrayContaining(["spec-approved", "ready-for-agent"]),
+    );
+
+    const own = await tracker.readIssue(await file("--no-inherit-labels"));
+    expect(own).toMatchObject({ parent: ids.gatedSpec, labels: [] });
+  }, 30_000);
+
   it("lists every child of a spec, whatever its status", async () => {
     const children = await tracker.listChildren(ids.spec!);
     const byId = new Map(children.map((issue) => [issue.id, issue]));

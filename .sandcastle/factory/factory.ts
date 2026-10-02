@@ -391,15 +391,17 @@ const resolveOptions = (options: FactoryOptions): Context => {
       `parallel must be a whole number of at least 1, not ${parallel}`,
     );
   }
+  // Field by field, so an option passed as `undefined` gets its default.
   return {
-    repoDir: process.cwd(),
-    baseBranch: "main",
-    checks: ["npm run typecheck", "npm test"],
-    sandboxSetup: ["npm install"],
-    copyToWorktree: ["node_modules"],
-    heartbeatMs: 60_000,
-    log: console.log,
-    ...options,
+    tracker: options.tracker,
+    codeHost: options.codeHost,
+    repoDir: options.repoDir ?? process.cwd(),
+    baseBranch: options.baseBranch ?? "main",
+    checks: options.checks ?? ["npm run typecheck", "npm test"],
+    sandboxSetup: options.sandboxSetup ?? ["npm install"],
+    copyToWorktree: options.copyToWorktree ?? ["node_modules"],
+    heartbeatMs: options.heartbeatMs ?? 60_000,
+    log: options.log ?? console.log,
     parallel,
     agent: options.agent ?? claudeCode("claude-opus-5-5"),
     sandbox: options.sandbox ?? docker(),

@@ -282,6 +282,18 @@ describe("runFactory", () => {
     });
   }, 60_000);
 
+  it("targets the default base branch when baseBranch is passed as undefined", async () => {
+    const { tracker, host, run } = await setup([quickTask({ id: "t-1" })], {
+      baseBranch: undefined,
+    });
+
+    const report = await run();
+
+    expect(report).toMatchObject({ taken: 1, accepted: 1 });
+    expect(host.pullRequests[0]).toMatchObject({ base: "main" });
+    expect(tracker.issue("t-1").status).toBe("closed");
+  }, 60_000);
+
   it("does not take a task without ready-for-agent, or one the ready list doesn't report", async () => {
     const { repoDir, tracker, host, run } = await setup([
       quickTask({ id: "t-no-gate", labels: [] }),

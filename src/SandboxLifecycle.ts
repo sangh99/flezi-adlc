@@ -161,6 +161,11 @@ export interface SandboxLifecycleOptions {
    *  detach-and-delete of the source branch so the worktree handle stays usable for
    *  subsequent `wt.run()` / `wt.interactive()` calls. */
   readonly keepSourceBranch?: boolean;
+  /** When true (the no-sandbox provider), the "sandbox" is the host itself: skip the
+   *  `git config --global` setup, which would edit the user's real ~/.gitconfig and
+   *  race on its lock when parallel runs start together. The host's git config
+   *  already trusts the worktree and carries the user's identity. */
+  readonly runsOnHost?: boolean;
 }
 
 export interface SandboxContext {
@@ -229,30 +234,32 @@ export const withSandboxLifecycle = <A>(
     let resolvedBranch = "";
     yield* display.taskLog("Setting up sandbox", (message) =>
       Effect.gen(function* () {
-        // The bind-mounted worktree may be owned by a different UID (host user
-        // vs sandbox user). Mark it safe so git doesn't reject it with
-        // "dubious ownership".
-        yield* execOkWithGitTimeout(
-          sandbox,
-          `git config --global --add safe.directory "${sandboxRepoDir}"`,
-          gitSetupTimeoutMs,
-        );
+        if (!options.runsOnHost) {
+          // The bind-mounted worktree may be owned by a different UID (host user
+          // vs sandbox user). Mark it safe so git doesn't reject it with
+          // "dubious ownership".
+          yield* execOkWithGitTimeout(
+            sandbox,
+            `git config --global --add safe.directory "${sandboxRepoDir}"`,
+            gitSetupTimeoutMs,
+          );
 
-        // Propagate host git identity into the sandbox so commits are attributed
-        // to the actual developer without requiring manual setup.
-        if (hostGitName) {
-          yield* execOkWithGitTimeout(
-            sandbox,
-            `git config --global user.name "${hostGitName.replace(/"/g, '\\"')}"`,
-            gitSetupTimeoutMs,
-          );
-        }
-        if (hostGitEmail) {
-          yield* execOkWithGitTimeout(
-            sandbox,
-            `git config --global user.email "${hostGitEmail.replace(/"/g, '\\"')}"`,
-            gitSetupTimeoutMs,
-          );
+          // Propagate host git identity into the sandbox so commits are attributed
+          // to the actual developer without requiring manual setup.
+          if (hostGitName) {
+            yield* execOkWithGitTimeout(
+              sandbox,
+              `git config --global user.name "${hostGitName.replace(/"/g, '\\"')}"`,
+              gitSetupTimeoutMs,
+            );
+          }
+          if (hostGitEmail) {
+            yield* execOkWithGitTimeout(
+              sandbox,
+              `git config --global user.email "${hostGitEmail.replace(/"/g, '\\"')}"`,
+              gitSetupTimeoutMs,
+            );
+          }
         }
 
         // Repo is bind-mounted — discover branch directly

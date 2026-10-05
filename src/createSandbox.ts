@@ -434,6 +434,7 @@ const buildSandboxHandle = (
               sandboxRepoPath: sandboxRepoDir,
               applyToHost,
               bindMountHandle,
+              runsOnHost: ctx.providerTag === "none",
             },
             sandbox,
           ).pipe(
@@ -614,6 +615,7 @@ const buildSandboxHandle = (
                 applyToHost,
                 timeouts,
                 keepSourceBranch: mergeToHead,
+                runsOnHost: ctx.providerTag === "none",
               },
               sandbox,
               (ctx) =>
@@ -832,9 +834,11 @@ export const createSandboxFromWorktree = async (
   if (sandboxOnReady?.length || hostOnReady?.length) {
     await Effect.runPromise(
       Effect.gen(function* () {
-        yield* sandbox.exec(
-          `git config --global --add safe.directory "${sandboxRepoDir}"`,
-        );
+        if (options.sandbox.tag !== "none") {
+          yield* sandbox.exec(
+            `git config --global --add safe.directory "${sandboxRepoDir}"`,
+          );
+        }
         const sandboxEffects = (sandboxOnReady ?? []).map((hook) =>
           sandbox.exec(hook.command, {
             cwd: sandboxRepoDir,
@@ -1020,9 +1024,11 @@ export const createSandbox = async (
 
           if (sandboxOnReady?.length || hostOnReady?.length) {
             yield* Effect.gen(function* () {
-              yield* sandbox.exec(
-                `git config --global --add safe.directory "${sandboxRepoDir}"`,
-              );
+              if (options.sandbox.tag !== "none") {
+                yield* sandbox.exec(
+                  `git config --global --add safe.directory "${sandboxRepoDir}"`,
+                );
+              }
               const sandboxEffects = (sandboxOnReady ?? []).map((hook) =>
                 sandbox.exec(hook.command, {
                   cwd: sandboxRepoDir,

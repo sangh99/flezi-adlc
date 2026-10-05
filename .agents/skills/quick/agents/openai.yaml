@@ -1,0 +1,5 @@
+interface:
+  display_name: "Quick"
+  short_description: "Turn a small change into one task"
+policy:
+  allow_implicit_invocation: false

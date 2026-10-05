@@ -7,7 +7,7 @@ This document is for contributors adding support for a new **agent** (e.g. Claud
 3. [Scaffold integration](#scaffold-integration) — what `sandcastle init` needs to offer the agent.
 4. [Implementation checklist](#implementation-checklist) — every file to touch.
 
-For terminology (**agent**, **agent provider**, **sandbox**, etc.), see [`CONTEXT.md`](../../CONTEXT.md).
+For terminology (**agent**, **agent provider**, **sandbox**, etc.), see [`GLOSSARY.md`](../../GLOSSARY.md).
 
 ## Evaluating a new agent
 
@@ -170,5 +170,5 @@ For a new agent provider `foo`:
 - [ ] Public export from [`src/index.ts`](../../src/index.ts): the `foo` factory and the `FooOptions` type.
 - [ ] `AGENT_REGISTRY` entry in [`src/InitService.ts`](../../src/InitService.ts).
 - [ ] `FOO_DOCKERFILE` constant in `src/InitService.ts`.
-- [ ] Changeset in `.changeset/` (patch, since pre-1.0). See [`CLAUDE.md`](../../CLAUDE.md).
+- [ ] Changeset in `.changeset/` (patch, since pre-1.0). See [`AGENTS.md`](../../AGENTS.md).
 - [ ] `README.md` update if the public-facing list of supported agents is mentioned there.

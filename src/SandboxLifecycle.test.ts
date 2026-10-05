@@ -1314,6 +1314,71 @@ describe("withSandboxLifecycle (worktree mode)", () => {
     expect(safeDirAttempts).toBe(1);
   });
 
+  // Records every command; stubs `git config --global` so tests never touch
+  // the real ~/.gitconfig, and runs everything else in the worktree.
+  const makeRecordingSandbox = (worktreeDir: string) => {
+    const commands: string[] = [];
+    const local = makeLocalSandbox(worktreeDir);
+    const sandbox: SandboxService = {
+      exec: (command, options) => {
+        commands.push(command);
+        return command.startsWith("git config --global")
+          ? Effect.succeed({ stdout: "", stderr: "", exitCode: 0 })
+          : local.exec(command, options);
+      },
+      copyIn: (hp, sp) => local.copyIn(hp, sp),
+      copyFileOut: (sp, hp) => local.copyFileOut(sp, hp),
+    };
+    return { sandbox, commands };
+  };
+
+  it("sets up global git config inside a sandbox", async () => {
+    const { hostDir, worktreeDir } = await setupWorktree();
+    const { sandbox, commands } = makeRecordingSandbox(worktreeDir);
+
+    await Effect.runPromise(
+      withSandboxLifecycle(
+        {
+          hostRepoDir: hostDir,
+          sandboxRepoDir: worktreeDir,
+          branch: "sandcastle/test",
+        },
+        sandbox,
+        () => Effect.succeed("ok"),
+      ).pipe(Effect.provide(testDisplayLayer)),
+    );
+
+    const globalConfig = commands.filter((c) =>
+      c.startsWith("git config --global"),
+    );
+    expect(globalConfig).toEqual([
+      `git config --global --add safe.directory "${worktreeDir}"`,
+      'git config --global user.name "Test"',
+      'git config --global user.email "test@test.com"',
+    ]);
+  });
+
+  it("skips global git config when runsOnHost is true (no-sandbox)", async () => {
+    const { hostDir, worktreeDir } = await setupWorktree();
+    const { sandbox, commands } = makeRecordingSandbox(worktreeDir);
+
+    const result = await Effect.runPromise(
+      withSandboxLifecycle(
+        {
+          hostRepoDir: hostDir,
+          sandboxRepoDir: worktreeDir,
+          branch: "sandcastle/test",
+          runsOnHost: true,
+        },
+        sandbox,
+        () => Effect.succeed("ok"),
+      ).pipe(Effect.provide(testDisplayLayer)),
+    );
+
+    expect(result.result).toBe("ok");
+    expect(commands.some((c) => c.includes("git config --global"))).toBe(false);
+  });
+
   it("respects a gitSetupMs timeout override", async () => {
     const { hostDir, worktreeDir } = await setupWorktree();
 

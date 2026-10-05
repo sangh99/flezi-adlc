@@ -55,9 +55,9 @@ describe("InitService scaffold", () => {
       join(dir, ".sandcastle", "Dockerfile"),
       "utf-8",
     );
-    // Template has {{ISSUE_TRACKER_TOOLS}} replaced — should contain GitHub CLI (default issue tracker)
+    // Template has {{ISSUE_TRACKER_TOOLS}} replaced — should contain the Beads installer (default issue tracker)
     expect(dockerfile).toContain("FROM node:22-bookworm");
-    expect(dockerfile).toContain("GitHub CLI");
+    expect(dockerfile).toContain("steveyegge/beads");
     expect(dockerfile).not.toContain("{{ISSUE_TRACKER_TOOLS}}");
   });
 
@@ -222,7 +222,8 @@ describe("InitService scaffold", () => {
 
   it("claude-code Dockerfile template does not install pnpm or enable corepack", async () => {
     const dir = await makeDir();
-    await runScaffold(dir);
+    // Beads' tools snippet enables corepack, so use a tracker that doesn't
+    await runScaffold(dir, { issueTracker: getIssueTracker("github-issues") });
 
     const dockerfile = await readFile(
       join(dir, ".sandcastle", "Dockerfile"),
@@ -373,7 +374,7 @@ describe("InitService scaffold", () => {
       join(dir, ".sandcastle", "prompt.md"),
       "utf-8",
     );
-    expect(prompt).toContain("!`gh issue");
+    expect(prompt).toContain("!`bd ready");
     expect(prompt).toContain("!`git log");
     expect(prompt).toContain("<promise>COMPLETE</promise>");
   });
@@ -453,8 +454,8 @@ describe("InitService scaffold", () => {
         join(dir, ".sandcastle", "implement-prompt.md"),
         "utf-8",
       );
-      expect(prompt).toContain("gh issue list");
-      expect(prompt).toContain("gh issue close");
+      expect(prompt).toContain("bd ready");
+      expect(prompt).toContain("bd close");
       expect(prompt).not.toContain("{{ISSUE_NUMBER}}");
       expect(prompt).not.toContain("{{ISSUE_TITLE}}");
       expect(prompt).not.toContain("{{BRANCH}}");
@@ -876,7 +877,11 @@ describe("InitService scaffold", () => {
 
   it("simple-loop prompt.md retains --label Sandcastle when createLabel is true", async () => {
     const dir = await makeDir();
-    await runScaffold(dir, { templateName: "simple-loop", createLabel: true });
+    await runScaffold(dir, {
+      templateName: "simple-loop",
+      issueTracker: getIssueTracker("github-issues"),
+      createLabel: true,
+    });
 
     const prompt = await readFile(
       join(dir, ".sandcastle", "prompt.md"),
@@ -887,7 +892,11 @@ describe("InitService scaffold", () => {
 
   it("simple-loop prompt.md strips --label Sandcastle when createLabel is false", async () => {
     const dir = await makeDir();
-    await runScaffold(dir, { templateName: "simple-loop", createLabel: false });
+    await runScaffold(dir, {
+      templateName: "simple-loop",
+      issueTracker: getIssueTracker("github-issues"),
+      createLabel: false,
+    });
 
     const prompt = await readFile(
       join(dir, ".sandcastle", "prompt.md"),
@@ -904,6 +913,7 @@ describe("InitService scaffold", () => {
     const dir = await makeDir();
     await runScaffold(dir, {
       templateName: "parallel-planner",
+      issueTracker: getIssueTracker("github-issues"),
       createLabel: false,
     });
 
@@ -919,6 +929,7 @@ describe("InitService scaffold", () => {
     const dir = await makeDir();
     await runScaffold(dir, {
       templateName: "sequential-reviewer",
+      issueTracker: getIssueTracker("github-issues"),
       createLabel: false,
     });
 
@@ -952,7 +963,10 @@ describe("InitService scaffold", () => {
 
   it("createLabel defaults to true (label retained when not specified)", async () => {
     const dir = await makeDir();
-    await runScaffold(dir, { templateName: "simple-loop" });
+    await runScaffold(dir, {
+      templateName: "simple-loop",
+      issueTracker: getIssueTracker("github-issues"),
+    });
 
     const prompt = await readFile(
       join(dir, ".sandcastle", "prompt.md"),
@@ -1074,9 +1088,9 @@ describe("InitService scaffold", () => {
         join(configDir, ".env.example"),
         "utf-8",
       );
-      // Dynamic env: claude-code agent → CLAUDE_CODE_OAUTH_TOKEN, default issue tracker → GH_TOKEN
+      // Dynamic env: claude-code agent → CLAUDE_CODE_OAUTH_TOKEN, default issue tracker (beads) → no token
       expect(envExample).toContain("CLAUDE_CODE_OAUTH_TOKEN=");
-      expect(envExample).toContain("GH_TOKEN=");
+      expect(envExample).not.toContain("GH_TOKEN=");
     });
   });
 
@@ -1261,9 +1275,9 @@ describe("InitService scaffold", () => {
         join(configDir, ".env.example"),
         "utf-8",
       );
-      // Dynamic env: claude-code agent → CLAUDE_CODE_OAUTH_TOKEN, default issue tracker → GH_TOKEN
+      // Dynamic env: claude-code agent → CLAUDE_CODE_OAUTH_TOKEN, default issue tracker (beads) → no token
       expect(envExample).toContain("CLAUDE_CODE_OAUTH_TOKEN=");
-      expect(envExample).toContain("GH_TOKEN=");
+      expect(envExample).not.toContain("GH_TOKEN=");
     });
 
     it("main.mts references the specified model for all factory calls", async () => {
@@ -1351,7 +1365,9 @@ describe("InitService scaffold", () => {
       const manager = getIssueTracker("beads");
       expect(manager).toBeDefined();
       expect(manager!.label).toBe("Beads");
-      expect(manager!.templateArgs.LIST_TASKS_COMMAND).toBe("bd ready --json");
+      expect(manager!.templateArgs.LIST_TASKS_COMMAND).toBe(
+        "bd ready --json --exclude-type epic",
+      );
       expect(manager!.templateArgs.VIEW_TASK_COMMAND).toContain("bd show");
       expect(manager!.templateArgs.CLOSE_TASK_COMMAND).toContain("bd close");
       expect(manager!.templateArgs.CLOSE_TASK_COMMAND).toContain("--reason=");
@@ -1525,7 +1541,7 @@ describe("InitService scaffold", () => {
       expect(prompt).toContain("gh issue list");
     });
 
-    it("scaffold without issueTracker defaults to github-issues", async () => {
+    it("scaffold without issueTracker defaults to beads", async () => {
       const dir = await makeDir();
       await runScaffold(dir, { templateName: "simple-loop" });
 
@@ -1533,8 +1549,8 @@ describe("InitService scaffold", () => {
         join(dir, ".sandcastle", "prompt.md"),
         "utf-8",
       );
-      // Should default to github-issues and replace placeholders
-      expect(prompt).toContain("gh issue list");
+      // Should default to beads and replace placeholders
+      expect(prompt).toContain("bd ready --json");
       expect(prompt).not.toContain("{{LIST_TASKS_COMMAND}}");
     });
 

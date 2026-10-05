@@ -416,6 +416,7 @@ export const createWorktree = async (
             applyToHost,
             timeouts: options.timeouts,
             keepSourceBranch: isMergeToHead,
+            runsOnHost: resolvedSandbox.tag === "none",
           },
           sandbox,
           (ctx) =>

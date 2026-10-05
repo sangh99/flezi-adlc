@@ -1,0 +1,1118 @@
+/**
+ * The factory: takes approved work from the tracker, implements it in a
+ * sandbox, runs the required checks itself and opens a pull request for the
+ * merge gate. One call to `runFactory` is one pass over the backlog; it runs
+ * to completion and returns a report.
+ *
+ * Three workflows are implemented:
+ *
+ * - Quick: a parentless task carrying `ready-for-agent`, built on its own
+ *   branch cut from the base branch, with its own pull request.
+ * - Bugfix: a bug carrying `ready-for-agent` (the Diagnosis gate), with or
+ *   without a parent. Built like a Quick task, regression test first, from
+ *   the diagnosis in the bug body.
+ * - Feature: a task under a spec that has passed the Spec and Task gates.
+ *   Each task is built on its own branch cut from the spec's integration
+ *   branch and merged back into it on the host, with one merge agent to
+ *   resolve a conflict. Once every task of the spec is closed, a reviewer
+ *   agent works over the integration branch and the factory opens one pull
+ *   request for the whole spec, then closes the spec in the first run after
+ *   that pull request is merged.
+ *
+ * Work runs in parallel, up to a limit, each piece in its own sandbox.
+ * Work the factory gives up on is parked with `factory-failed` and its
+ * claim released, until a person removes the label.
+ *
+ * The factory never writes the base branch or the host's checkout.
+ */
+import { fileURLToPath } from "node:url";
+import { z } from "zod";
+import {
+  claudeCode,
+  createSandbox,
+  Output,
+  type AgentProvider,
+  type OutputObjectDefinition,
+  type Sandbox,
+  type SandboxProvider,
+} from "../../src/index.js";
+import { docker } from "../../src/sandboxes/docker.js";
+import type { CodeHost } from "./code-host.js";
+import {
+  ensureBranch,
+  freshBranch,
+  mergeBranch,
+  removeSandboxWorktree,
+} from "./host-git.js";
+import type { Tracker, TrackerIssue } from "./tracker.js";
+
+export const LABELS = {
+  /** Spec gate has been passed (on a spec). */
+  specApproved: "spec-approved",
+  /**
+   * Task gate (on a spec, or on a Quick task) or Diagnosis gate (on a bug)
+   * has been passed.
+   */
+  readyForAgent: "ready-for-agent",
+  /** Added by the factory when it gives up on a piece of work. */
+  factoryFailed: "factory-failed",
+  /**
+   * Added by the factory to a spec once it has opened the spec's pull
+   * request, so no later run opens a second one.
+   */
+  prOpened: "factory-pr-opened",
+} as const;
+
+/**
+ * Metadata key holding the URL of the pull request the factory opened, on a
+ * spec, a Quick task or a bug. Set as soon as the pull request opens, so a
+ * retry after a later failure doesn't build the work again.
+ */
+export const PR_URL_KEY = "factory.pr";
+
+/**
+ * Feature task metadata key holding the merge commit that landed the task
+ * on its spec's integration branch. Set as soon as the merge lands, so a
+ * retry after a later failure doesn't build or merge the task again.
+ */
+export const MERGED_KEY = "factory.merged";
+
+export interface FactoryOptions {
+  readonly tracker: Tracker;
+  readonly codeHost: CodeHost;
+  /** Host repo directory. Default: `process.cwd()`. */
+  readonly repoDir?: string;
+  /** Branch that work is cut from and pull requests target. Default: "main". */
+  readonly baseBranch?: string;
+  /** Implementer agent and model. Default: `claudeCode("claude-opus-5-5")`. */
+  readonly agent?: AgentProvider;
+  /** Sandbox provider. Default: `docker()`. */
+  readonly sandbox?: SandboxProvider;
+  /**
+   * Commands the factory runs in the sandbox after the agent finishes. Work
+   * is accepted only if every one exits 0.
+   * Default: `["npm run typecheck", "npm test"]`.
+   */
+  readonly checks?: readonly string[];
+  /** Commands run in the sandbox once it is up. Default: `["npm install"]`. */
+  readonly sandboxSetup?: readonly string[];
+  /** Host paths copied into each worktree. Default: `["node_modules"]`. */
+  readonly copyToWorktree?: readonly string[];
+  /**
+   * Most pieces of work built at once, each in its own sandbox. Merges into
+   * a spec's integration branch still happen one at a time. Default: 4.
+   */
+  readonly parallel?: number;
+  /**
+   * How often, in milliseconds, the factory renews its claim on a piece of
+   * work while it runs. Beads' claims lapse after 5 minutes without one.
+   * Default: 60_000.
+   */
+  readonly heartbeatMs?: number;
+  /** Progress lines. Default: `console.log`. */
+  readonly log?: (line: string) => void;
+}
+
+export type Workflow = "quick" | "feature" | "bugfix";
+
+export interface TaskOutcome {
+  readonly taskId: string;
+  readonly workflow: Workflow;
+  readonly branch: string;
+  readonly status: "accepted" | "failed";
+  /** What happened, for the report and the tracker. */
+  readonly note: string;
+  readonly pullRequestUrl?: string;
+}
+
+/**
+ * What happened to a spec in the run: its review and pull request once all
+ * its tasks were closed ("pr-opened" or "failed"), or its closing once that
+ * pull request was merged ("closed", or "failed" if closing it failed).
+ */
+export interface SpecOutcome {
+  readonly specId: string;
+  /** The integration branch: the pull request's head. */
+  readonly branch: string;
+  readonly status: "pr-opened" | "closed" | "failed";
+  readonly note: string;
+  /** Set when the run opened the spec's pull request. */
+  readonly pullRequestUrl?: string;
+}
+
+export interface FactoryReport {
+  /** Tasks taken. */
+  readonly taken: number;
+  readonly accepted: number;
+  readonly failed: number;
+  /** Every pull request opened, for Quick tasks and for specs. */
+  readonly pullRequests: readonly string[];
+  readonly outcomes: readonly TaskOutcome[];
+  readonly specs: readonly SpecOutcome[];
+}
+
+const AgentResultSchema = z.object({
+  status: z.enum(["done", "blocked"]),
+  note: z.string(),
+});
+
+/** The structured result the implementer ends its final message with. */
+export const agentResult = Output.object({
+  tag: "factory-result",
+  schema: AgentResultSchema,
+});
+
+/** The structured result the spec reviewer ends its final message with. */
+export const reviewResult = Output.object({
+  tag: "factory-result",
+  schema: AgentResultSchema.extend({ prBody: z.string().optional() }),
+});
+
+const IMPLEMENT_PROMPT = fileURLToPath(
+  new URL("./implement-prompt.md", import.meta.url),
+);
+const BUGFIX_PROMPT = fileURLToPath(
+  new URL("./bugfix-prompt.md", import.meta.url),
+);
+const FEATURE_PROMPT = fileURLToPath(
+  new URL("./feature-prompt.md", import.meta.url),
+);
+const REVIEW_PROMPT = fileURLToPath(
+  new URL("./review-prompt.md", import.meta.url),
+);
+const MERGE_PROMPT = fileURLToPath(
+  new URL("./merge-prompt.md", import.meta.url),
+);
+
+/** Branch a task is built on. */
+const taskBranch = (taskId: string) => `factory/${taskId}`;
+/** Branch a spec's accepted tasks are merged into: its pull request's head. */
+const integrationBranch = (specId: string) => `factory/${specId}`;
+
+/** Run the factory once over the backlog. */
+export const runFactory = async (
+  options: FactoryOptions,
+): Promise<FactoryReport> => {
+  const ctx = resolveOptions(options);
+  const specs: SpecOutcome[] = [...(await closeMergedSpecs(ctx))];
+
+  const outcomes: TaskOutcome[] = [];
+  await runAll(ctx, async (item) => {
+    outcomes.push(
+      item.workflow === "feature"
+        ? await runFeatureTask(ctx, item.task, item.spec)
+        : await runOwnBranch(ctx, item.workflow, item.task),
+    );
+  });
+
+  // Every spec due its pull request, whether its last task closed in this
+  // run or an earlier run stopped before the PR step.
+  for (const specId of await specsDueTheirPr(ctx)) {
+    const outcome = await finishSpec(ctx, specId);
+    if (outcome) specs.push(outcome);
+  }
+
+  const report = summarise(outcomes, specs);
+  ctx.log(formatReport(report));
+  return report;
+};
+
+export const formatReport = (report: FactoryReport): string =>
+  [
+    "Factory run report",
+    `  taken: ${report.taken}  accepted: ${report.accepted}  failed: ${report.failed}  PRs opened: ${report.pullRequests.length}`,
+    ...report.outcomes.map(
+      (o) =>
+        `  ${o.status === "accepted" ? "+" : "x"} ${o.taskId} (${o.workflow}) ${o.pullRequestUrl ?? o.note}`,
+    ),
+    ...report.specs.map(
+      (s) =>
+        `  ${s.status === "failed" ? "x" : "+"} ${s.specId} (spec) ${s.pullRequestUrl ?? s.note}`,
+    ),
+  ].join("\n");
+
+// ---------------------------------------------------------------------------
+// Scheduling
+// ---------------------------------------------------------------------------
+
+/**
+ * Run `runItem` on every eligible piece of work, up to `ctx.parallel` at
+ * once. The ready list is read again whenever a slot frees up, so work
+ * unblocked by a Feature task closing earlier in the run is taken in this
+ * run too. Each piece is attempted at most once per run, which also bounds
+ * the loop. Ends once nothing is running and nothing new is eligible.
+ * If the ready list can't be read, no new work is taken: the work already
+ * running finishes (and releases its claims) before the error is rethrown.
+ */
+const runAll = async (
+  ctx: Context,
+  runItem: (item: WorkItem) => Promise<void>,
+): Promise<void> => {
+  const attempted = new Set<string>();
+  const running = new Set<Promise<void>>();
+  for (;;) {
+    if (running.size < ctx.parallel) {
+      let work: WorkItem[];
+      try {
+        work = await findWork(ctx.tracker);
+      } catch (error) {
+        await Promise.allSettled(running);
+        throw error;
+      }
+      for (const item of work) {
+        if (running.size >= ctx.parallel) break;
+        if (attempted.has(item.task.id)) continue;
+        attempted.add(item.task.id);
+        const job: Promise<void> = runItem(item)
+          .catch((error) =>
+            ctx.log(`  ${item.task.id} failed: ${messageOf(error)}`),
+          )
+          .finally(() => running.delete(job));
+        running.add(job);
+      }
+    }
+    if (running.size === 0) return;
+    await Promise.race(running);
+  }
+};
+
+/**
+ * Renew the claim on `id` every `ctx.heartbeatMs` until the returned
+ * function is called. A failed renewal is logged; the work carries on.
+ */
+const keepClaim = (ctx: Context, id: string): (() => void) => {
+  const timer = setInterval(() => {
+    ctx.tracker
+      .heartbeat(id)
+      .catch((error) =>
+        ctx.log(`  could not renew the claim on ${id}: ${messageOf(error)}`),
+      );
+  }, ctx.heartbeatMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
+};
+
+/**
+ * Runs jobs one at a time per key, in the order they were queued. Jobs on
+ * different keys run independently.
+ */
+const keyedQueue = () => {
+  const tails = new Map<string, Promise<unknown>>();
+  return <T>(key: string, job: () => Promise<T>): Promise<T> => {
+    const run = (tails.get(key) ?? Promise.resolve()).then(job);
+    tails.set(
+      key,
+      run.catch(() => {}),
+    );
+    return run;
+  };
+};
+
+// ---------------------------------------------------------------------------
+// Eligibility
+// ---------------------------------------------------------------------------
+
+/** Workflows whose work is built on its own branch, with its own PR. */
+type OwnBranchWorkflow = "quick" | "bugfix";
+
+type WorkItem =
+  | { readonly workflow: OwnBranchWorkflow; readonly task: TrackerIssue }
+  | {
+      readonly workflow: "feature";
+      readonly task: TrackerIssue;
+      readonly spec: TrackerIssue;
+    };
+
+/**
+ * Pick the work the factory may take from a snapshot of the ready list.
+ * A Feature task is eligible through its parent spec's gate labels.
+ */
+const findWork = async (tracker: Tracker): Promise<WorkItem[]> => {
+  const ready = await tracker.listReady();
+  const specs = new Map<string, Promise<TrackerIssue>>();
+  const readSpec = (id: string): Promise<TrackerIssue> => {
+    let spec = specs.get(id);
+    if (!spec) {
+      spec = tracker.readIssue(id);
+      specs.set(id, spec);
+    }
+    return spec;
+  };
+
+  const work: WorkItem[] = [];
+  for (const task of ready) {
+    // Parked by an earlier run until a person removes the label.
+    if (task.labels.includes(LABELS.factoryFailed)) continue;
+    if (task.type === "bug") {
+      // A bug passes its own Diagnosis gate, so it is a Bugfix item even
+      // when filed under a spec: its parent's labels don't matter.
+      if (task.labels.includes(LABELS.readyForAgent)) {
+        work.push({ workflow: "bugfix", task });
+      }
+      continue;
+    }
+    if (task.type !== "task") continue;
+    if (task.parent === undefined) {
+      if (task.labels.includes(LABELS.readyForAgent)) {
+        work.push({ workflow: "quick", task });
+      }
+      continue;
+    }
+    const spec = await readSpec(task.parent);
+    if (
+      spec.type === "epic" &&
+      spec.labels.includes(LABELS.specApproved) &&
+      spec.labels.includes(LABELS.readyForAgent)
+    ) {
+      work.push({ workflow: "feature", task, spec });
+    }
+  }
+  return work;
+};
+
+// ---------------------------------------------------------------------------
+// Options
+// ---------------------------------------------------------------------------
+
+type Context = Required<Omit<FactoryOptions, "agent" | "sandbox">> & {
+  readonly agent: AgentProvider;
+  readonly sandbox: SandboxProvider;
+  /**
+   * Runs host writes to one integration branch one at a time, keyed by the
+   * branch, so concurrent tasks of a spec never merge into it at once.
+   */
+  readonly onIntegrationBranch: ReturnType<typeof keyedQueue>;
+};
+
+const resolveOptions = (options: FactoryOptions): Context => {
+  const parallel = options.parallel ?? 4;
+  if (!Number.isInteger(parallel) || parallel < 1) {
+    throw new Error(
+      `parallel must be a whole number of at least 1, not ${parallel}`,
+    );
+  }
+  // Field by field, so an option passed as `undefined` gets its default.
+  return {
+    tracker: options.tracker,
+    codeHost: options.codeHost,
+    repoDir: options.repoDir ?? process.cwd(),
+    baseBranch: options.baseBranch ?? "main",
+    checks: options.checks ?? ["npm run typecheck", "npm test"],
+    sandboxSetup: options.sandboxSetup ?? ["npm install"],
+    copyToWorktree: options.copyToWorktree ?? ["node_modules"],
+    heartbeatMs: options.heartbeatMs ?? 60_000,
+    log: options.log ?? console.log,
+    parallel,
+    agent: options.agent ?? claudeCode("claude-opus-5-5"),
+    sandbox: options.sandbox ?? docker(),
+    onIntegrationBranch: keyedQueue(),
+  };
+};
+
+// ---------------------------------------------------------------------------
+// Quick and Bugfix workflows
+// ---------------------------------------------------------------------------
+
+/** How a Quick task or a bug is put to the implementer and described. */
+interface OwnBranchKind {
+  readonly promptFile: string;
+  readonly promptArgs: (
+    issue: TrackerIssue,
+    baseBranch: string,
+  ) => Record<string, string>;
+  /** The pull request body's opening lines. */
+  readonly prIntro: (issue: TrackerIssue) => readonly string[];
+}
+
+const OWN_BRANCH: Record<OwnBranchWorkflow, OwnBranchKind> = {
+  quick: {
+    promptFile: IMPLEMENT_PROMPT,
+    promptArgs: (task, baseBranch) => ({
+      TASK_ID: task.id,
+      TASK_TITLE: task.title,
+      TASK_BODY: task.body,
+      BASE_BRANCH: baseBranch,
+    }),
+    prIntro: (task) => [`Implements Beads task \`${task.id}\`.`],
+  },
+  bugfix: {
+    promptFile: BUGFIX_PROMPT,
+    promptArgs: (bug, baseBranch) => ({
+      BUG_ID: bug.id,
+      BUG_TITLE: bug.title,
+      BUG_BODY: bug.body,
+      BASE_BRANCH: baseBranch,
+    }),
+    prIntro: (bug) => {
+      const rootCause = markdownSection(bug.body, "Root Cause");
+      return [
+        `Fixes Beads bug \`${bug.id}\`.`,
+        ...(rootCause
+          ? ["", "Root cause, from the diagnosis:", "", rootCause]
+          : []),
+      ];
+    },
+  },
+};
+
+/** The text under `## <heading>` in `body`, up to the next `##` heading. */
+const markdownSection = (body: string, heading: string): string | undefined => {
+  const lines = body.split("\n");
+  const start = lines.findIndex(
+    (line) => line.trim().toLowerCase() === `## ${heading.toLowerCase()}`,
+  );
+  if (start === -1) return undefined;
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((line) => /^#{1,2} /.test(line));
+  const text = (end === -1 ? rest : rest.slice(0, end)).join("\n").trim();
+  return text || undefined;
+};
+
+/**
+ * Build a Quick task or a bug on its own branch cut from the base branch,
+ * then push it, open its pull request and close the issue. If an earlier
+ * attempt opened the pull request, only comment it and close the issue.
+ */
+const runOwnBranch = async (
+  ctx: Context,
+  workflow: OwnBranchWorkflow,
+  ready: TrackerIssue,
+): Promise<TaskOutcome> => {
+  const kind = OWN_BRANCH[workflow];
+  const branch = taskBranch(ready.id);
+  const outcome = (
+    status: TaskOutcome["status"],
+    note: string,
+    pullRequestUrl?: string,
+  ): TaskOutcome => ({
+    taskId: ready.id,
+    workflow,
+    branch,
+    status,
+    note,
+    pullRequestUrl,
+  });
+
+  ctx.log(`Taking ${ready.id}: ${ready.title} on ${branch}`);
+  try {
+    await ctx.tracker.claim(ready.id);
+  } catch (error) {
+    // Someone else may hold it: leave the task alone.
+    return outcome("failed", `Could not claim: ${messageOf(error)}`);
+  }
+
+  const stopRenewing = keepClaim(ctx, ready.id);
+  const closeWithPr = async (url: string) => {
+    await ctx.tracker.comment(
+      ready.id,
+      `Factory opened a pull request: ${url}`,
+    );
+    await ctx.tracker.close(ready.id, `Pull request opened: ${url}`);
+  };
+  let url: string | undefined;
+  try {
+    const task = await ctx.tracker.readIssue(ready.id);
+    url = task.metadata[PR_URL_KEY];
+    if (url) {
+      // An earlier attempt opened it, then failed before closing the issue.
+      ctx.log(`  ${task.id} already has its pull request: ${url}`);
+      await closeWithPr(url);
+      return outcome(
+        "accepted",
+        `Pull request opened by an earlier run: ${url}`,
+      );
+    }
+
+    const built = await build(ctx, {
+      branch,
+      baseBranch: ctx.baseBranch,
+      name: `Implementer ${task.id}`,
+      promptFile: kind.promptFile,
+      promptArgs: kind.promptArgs(task, ctx.baseBranch),
+    });
+    if (!built.ok) {
+      await parkTask(ctx, task.id, NO_PR, built.note);
+      return outcome("failed", built.note);
+    }
+
+    await ctx.codeHost.pushBranch(branch);
+    url = await ctx.codeHost.openPullRequest({
+      branch,
+      base: ctx.baseBranch,
+      title: task.title,
+      body: [...kind.prIntro(task), "", built.note, "", checksLine(ctx)].join(
+        "\n",
+      ),
+    });
+    // Recorded first, so a retry after a failure from here only closes it.
+    await ctx.tracker.setMetadata(task.id, PR_URL_KEY, url);
+    await closeWithPr(url);
+    return outcome("accepted", built.note, url);
+  } catch (error) {
+    const note = url
+      ? `Pull request ${url} was opened, then the factory failed: ${messageOf(error)}`
+      : `Factory error: ${messageOf(error)}`;
+    await parkTask(ctx, ready.id, url ? NOT_CLOSED : NO_PR, note);
+    return outcome("failed", note, url);
+  } finally {
+    stopRenewing();
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Feature workflow
+// ---------------------------------------------------------------------------
+
+/**
+ * Build one task of a spec and merge it into the spec's integration branch,
+ * then close it. If an earlier attempt merged it, only close it.
+ */
+const runFeatureTask = async (
+  ctx: Context,
+  ready: TrackerIssue,
+  spec: TrackerIssue,
+): Promise<TaskOutcome> => {
+  const branch = taskBranch(ready.id);
+  const integration = integrationBranch(spec.id);
+  const outcome = (
+    status: TaskOutcome["status"],
+    note: string,
+  ): TaskOutcome => ({
+    taskId: ready.id,
+    workflow: "feature",
+    branch,
+    status,
+    note,
+  });
+
+  ctx.log(`Taking ${ready.id}: ${ready.title} on ${branch} (spec ${spec.id})`);
+  try {
+    await ctx.tracker.claim(ready.id);
+  } catch (error) {
+    return outcome("failed", `Could not claim: ${messageOf(error)}`);
+  }
+
+  const stopRenewing = keepClaim(ctx, ready.id);
+  let merged: string | undefined;
+  try {
+    const task = await ctx.tracker.readIssue(ready.id);
+    merged = task.metadata[MERGED_KEY];
+    if (merged) {
+      // An earlier attempt merged it, then failed before closing the task.
+      ctx.log(`  ${task.id} was already merged into ${integration}: ${merged}`);
+      await ctx.tracker.close(task.id, `Merged into ${integration}`);
+      return outcome(
+        "accepted",
+        `Merged into ${integration} by an earlier run, as ${merged}.`,
+      );
+    }
+
+    await ctx.onIntegrationBranch(integration, () =>
+      ensureBranch(ctx.repoDir, integration, ctx.baseBranch),
+    );
+    const built = await build(ctx, {
+      branch,
+      baseBranch: integration,
+      name: `Implementer ${task.id}`,
+      promptFile: FEATURE_PROMPT,
+      promptArgs: {
+        TASK_ID: task.id,
+        TASK_TITLE: task.title,
+        TASK_BODY: task.body,
+        SPEC_ID: spec.id,
+        SPEC_TITLE: spec.title,
+        SPEC_BODY: spec.body,
+        INTEGRATION_BRANCH: integration,
+      },
+    });
+    if (!built.ok) {
+      await parkTask(ctx, task.id, NOT_MERGED, built.note);
+      return outcome("failed", built.note);
+    }
+
+    // The merge agent, if one is needed, runs inside the queue too, so its
+    // retry merges against the same integration commit it resolved.
+    const landed = await ctx.onIntegrationBranch(integration, () =>
+      land(ctx, { task, spec, branch, integration }),
+    );
+    if (!landed.ok) {
+      await parkTask(ctx, task.id, NOT_MERGED, landed.note);
+      return outcome("failed", landed.note);
+    }
+
+    merged = landed.sha;
+    // Recorded first, so a retry after a failure from here only closes it.
+    await ctx.tracker.setMetadata(task.id, MERGED_KEY, merged);
+    await ctx.tracker.close(task.id, `Merged into ${integration}`);
+    return outcome("accepted", built.note);
+  } catch (error) {
+    const note = merged
+      ? `Merged into ${integration} as ${merged}, then the factory failed: ${messageOf(error)}`
+      : `Factory error: ${messageOf(error)}`;
+    await parkTask(ctx, ready.id, merged ? NOT_CLOSED : NOT_MERGED, note);
+    return outcome("failed", note);
+  } finally {
+    stopRenewing();
+  }
+};
+
+/**
+ * Merge an accepted task branch into the integration branch on the host.
+ * On a conflict, one merge agent merges the integration branch into the
+ * task branch and resolves it, the required checks run again, and the merge
+ * is tried once more. A second failure fails the task and leaves the
+ * integration branch where it was.
+ */
+const land = async (
+  ctx: Context,
+  job: {
+    readonly task: TrackerIssue;
+    readonly spec: TrackerIssue;
+    readonly branch: string;
+    readonly integration: string;
+  },
+): Promise<{ ok: true; sha: string } | BuildFailure> => {
+  const { task, branch, integration } = job;
+  const merge = () =>
+    mergeBranch(ctx.repoDir, {
+      into: integration,
+      from: branch,
+      message: `Merge ${branch} into ${integration}\n\n${task.id}: ${task.title}`,
+    });
+  const conflictNote = (conflicts: readonly string[], after?: string) =>
+    [
+      `Merging ${branch} into ${integration} conflicts in:`,
+      ...conflicts.map((file) => `- ${file}`),
+      "",
+      ...(after ? [after, ""] : []),
+      `${integration} was left as it was.`,
+    ].join("\n");
+
+  // A spec review that failed may have left its sandbox's worktree on the
+  // integration branch, and the merge would refuse it.
+  await removeSandboxWorktree(ctx.repoDir, integration, "merge into");
+  const first = await merge();
+  if (first.ok) return first;
+
+  ctx.log(`  ${branch} conflicts with ${integration}: running a merge agent`);
+  const resolved = await resolveConflicts(ctx, job, first);
+  if (!resolved.ok) {
+    return { ok: false, note: conflictNote(first.conflicts, resolved.note) };
+  }
+  const second = await merge();
+  if (second.ok) return second;
+  return {
+    ok: false,
+    note: conflictNote(
+      second.conflicts,
+      `It still conflicts after the merge agent: ${resolved.note}`,
+    ),
+  };
+};
+
+/**
+ * Run the merge agent on the task branch, to merge the integration branch
+ * in at the commit that conflicted, then the required checks there.
+ */
+const resolveConflicts = async (
+  ctx: Context,
+  job: {
+    readonly task: TrackerIssue;
+    readonly spec: TrackerIssue;
+    readonly branch: string;
+    readonly integration: string;
+  },
+  conflict: { readonly conflicts: readonly string[]; readonly intoSha: string },
+): Promise<BuildResult> => {
+  const { task, spec, branch, integration } = job;
+  await using sandbox = await openSandbox(ctx, branch, integration);
+  const run = await sandbox.run({
+    name: `Merge agent ${task.id}`,
+    agent: ctx.agent,
+    promptFile: MERGE_PROMPT,
+    promptArgs: {
+      TASK_ID: task.id,
+      TASK_TITLE: task.title,
+      TASK_BODY: task.body,
+      SPEC_ID: spec.id,
+      SPEC_TITLE: spec.title,
+      INTEGRATION_BRANCH: integration,
+      INTEGRATION_COMMIT: conflict.intoSha,
+      CONFLICTS: conflict.conflicts.map((file) => `- ${file}`).join("\n"),
+    },
+  });
+
+  const result = await readAgentResult(run.stdout, agentResult);
+  if (!result) {
+    return {
+      ok: false,
+      note: "The merge agent ended without a valid result block.",
+    };
+  }
+  if (result.status === "blocked") {
+    return {
+      ok: false,
+      note: `The merge agent reported blocked: ${result.note}`,
+    };
+  }
+
+  const failed = await runChecks(ctx, sandbox);
+  if (failed) return { ok: false, note: `After the merge agent: ${failed}` };
+  return { ok: true, note: result.note };
+};
+
+/**
+ * Close every spec whose pull request the factory opened and the code host
+ * now reports merged: the spec's work has passed the merge gate.
+ */
+const closeMergedSpecs = async (ctx: Context): Promise<SpecOutcome[]> => {
+  const outcomes: SpecOutcome[] = [];
+  for (const spec of await ctx.tracker.listLabelled("epic", [
+    LABELS.prOpened,
+  ])) {
+    const url = spec.metadata[PR_URL_KEY];
+    if (!url) {
+      ctx.log(
+        `Spec ${spec.id} has ${LABELS.prOpened} but no ${PR_URL_KEY} metadata; close it by hand once its pull request is merged.`,
+      );
+      continue;
+    }
+    const outcome = (status: SpecOutcome["status"], note: string) => ({
+      specId: spec.id,
+      branch: integrationBranch(spec.id),
+      status,
+      note,
+    });
+    try {
+      if (!(await ctx.codeHost.isMerged(url))) continue;
+      await ctx.tracker.close(spec.id, `Pull request merged: ${url}`);
+      ctx.log(`Closed spec ${spec.id}: ${url} was merged.`);
+      outcomes.push(outcome("closed", `Pull request merged: ${url}`));
+    } catch (error) {
+      const note = `Could not close spec ${spec.id} after ${url}: ${messageOf(error)}`;
+      ctx.log(`  failed: ${note}`);
+      outcomes.push(outcome("failed", note));
+    }
+  }
+  return outcomes;
+};
+
+/**
+ * Specs that may be due their review and pull request: past both gates,
+ * with no pull request yet and not parked by an earlier failure.
+ * `finishSpec` checks that every task is closed.
+ */
+const specsDueTheirPr = async (ctx: Context): Promise<string[]> => {
+  const gated = await ctx.tracker.listLabelled("epic", [
+    LABELS.specApproved,
+    LABELS.readyForAgent,
+  ]);
+  return gated
+    .filter(
+      (spec) =>
+        !spec.labels.includes(LABELS.prOpened) &&
+        !spec.labels.includes(LABELS.factoryFailed),
+    )
+    .map((spec) => spec.id);
+};
+
+/**
+ * Once every task of the spec is closed, review the integration branch,
+ * re-run the required checks and open the spec's one pull request. Does
+ * nothing while a task is still open, or if the pull request was opened
+ * before. Returns undefined when there was nothing to do.
+ */
+const finishSpec = async (
+  ctx: Context,
+  specId: string,
+): Promise<SpecOutcome | undefined> => {
+  const branch = integrationBranch(specId);
+  const outcome = (
+    status: SpecOutcome["status"],
+    note: string,
+    pullRequestUrl?: string,
+  ): SpecOutcome => ({ specId, branch, status, note, pullRequestUrl });
+
+  let url: string | undefined;
+  try {
+    const spec = await ctx.tracker.readIssue(specId);
+    if (spec.labels.includes(LABELS.prOpened)) {
+      ctx.log(`Spec ${specId} already has its pull request.`);
+      return undefined;
+    }
+    const tasks = await ctx.tracker.listChildren(specId);
+    if (tasks.length === 0 || tasks.some((t) => t.status !== "closed")) {
+      return undefined;
+    }
+
+    ctx.log(`Reviewing spec ${specId} on ${branch}`);
+    const reviewed = await review(ctx, spec, tasks, branch);
+    if (!reviewed.ok) {
+      await recordFailure(ctx, specId, NO_PR, reviewed.note);
+      return outcome("failed", reviewed.note);
+    }
+
+    await ctx.codeHost.pushBranch(branch);
+    url = await ctx.codeHost.openPullRequest({
+      branch,
+      base: ctx.baseBranch,
+      title: spec.title,
+      body: [
+        reviewed.prBody,
+        "",
+        "---",
+        "",
+        `Implements Beads spec \`${spec.id}\`: ${spec.title}.`,
+        "",
+        "Tasks:",
+        ...tasks.map((t) => `- \`${t.id}\`: ${t.title}`),
+        "",
+        checksLine(ctx),
+      ].join("\n"),
+    });
+    // Mark first, so a failure after this point can't lead to a second PR.
+    await ctx.tracker.addLabel(specId, LABELS.prOpened);
+    // Read back by `closeMergedSpecs` in later runs.
+    await ctx.tracker.setMetadata(specId, PR_URL_KEY, url);
+    await ctx.tracker.comment(specId, `Factory opened a pull request: ${url}`);
+    return outcome("pr-opened", reviewed.note, url);
+  } catch (error) {
+    const note = url
+      ? `Pull request ${url} was opened, then the factory failed: ${messageOf(error)}`
+      : `Factory error: ${messageOf(error)}`;
+    await recordFailure(ctx, specId, NO_PR, note).catch(() => {});
+    return outcome("failed", note, url);
+  }
+};
+
+/**
+ * Run the reviewer on the integration branch, then the required checks on
+ * the reviewed branch.
+ */
+const review = async (
+  ctx: Context,
+  spec: TrackerIssue,
+  tasks: readonly TrackerIssue[],
+  branch: string,
+): Promise<{ ok: true; note: string; prBody: string } | BuildFailure> => {
+  // Sandcastle would reuse a worktree an earlier review left behind, with
+  // that attempt's uncommitted changes in it.
+  await removeSandboxWorktree(ctx.repoDir, branch, "review");
+  await using sandbox = await openSandbox(ctx, branch, ctx.baseBranch);
+  const run = await sandbox.run({
+    name: `Reviewer ${spec.id}`,
+    agent: ctx.agent,
+    promptFile: REVIEW_PROMPT,
+    promptArgs: {
+      SPEC_ID: spec.id,
+      SPEC_TITLE: spec.title,
+      SPEC_BODY: spec.body,
+      TASK_LIST: tasks.map((t) => `- ${t.id}: ${t.title}`).join("\n"),
+      BASE_BRANCH: ctx.baseBranch,
+    },
+  });
+
+  const result = await readAgentResult(run.stdout, reviewResult);
+  if (!result) {
+    return { ok: false, note: "Reviewer ended without a valid result block." };
+  }
+  if (result.status === "blocked") {
+    return { ok: false, note: `Reviewer reported blocked: ${result.note}` };
+  }
+  if (!result.prBody?.trim()) {
+    return {
+      ok: false,
+      note: "Reviewer reported done without a pull request body.",
+    };
+  }
+
+  const failed = await runChecks(ctx, sandbox);
+  if (failed) return { ok: false, note: `After the review pass: ${failed}` };
+  return { ok: true, note: result.note, prBody: result.prBody.trim() };
+};
+
+// ---------------------------------------------------------------------------
+// Sandbox runs
+// ---------------------------------------------------------------------------
+
+const messageOf = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+const checksLine = (ctx: Context): string =>
+  `Checks passed: ${ctx.checks.map((c) => `\`${c}\``).join(", ") || "none"}.`;
+
+type BuildFailure = { ok: false; note: string };
+type BuildResult = { ok: true; note: string } | BuildFailure;
+
+/**
+ * Run the implementer in a sandbox on `branch`, freshly cut from
+ * `baseBranch`, then the required checks there.
+ */
+const build = async (
+  ctx: Context,
+  job: {
+    readonly branch: string;
+    readonly baseBranch: string;
+    readonly name: string;
+    readonly promptFile: string;
+    readonly promptArgs: Record<string, string>;
+  },
+): Promise<BuildResult> => {
+  // Sandcastle reuses an existing branch as it is, so a retry would build on
+  // a failed attempt's commits. Every attempt starts from the base instead.
+  await freshBranch(ctx.repoDir, job.branch, job.baseBranch);
+  await using sandbox = await openSandbox(ctx, job.branch, job.baseBranch);
+
+  const run = await sandbox.run({
+    name: job.name,
+    agent: ctx.agent,
+    promptFile: job.promptFile,
+    promptArgs: job.promptArgs,
+  });
+
+  const result = await readAgentResult(run.stdout, agentResult);
+  if (!result) {
+    return { ok: false, note: "Agent ended without a valid result block." };
+  }
+  if (result.status === "blocked") {
+    return { ok: false, note: `Agent reported blocked: ${result.note}` };
+  }
+  if (run.commits.length === 0) {
+    return { ok: false, note: "Agent reported done but made no commits." };
+  }
+
+  const failed = await runChecks(ctx, sandbox);
+  if (failed) return { ok: false, note: failed };
+  return { ok: true, note: result.note };
+};
+
+/** A sandbox on `branch`, cut from `baseBranch` if it doesn't exist yet. */
+const openSandbox = (ctx: Context, branch: string, baseBranch: string) =>
+  createSandbox({
+    branch,
+    baseBranch,
+    sandbox: ctx.sandbox,
+    cwd: ctx.repoDir,
+    copyToWorktree: [...ctx.copyToWorktree],
+    hooks: {
+      sandbox: {
+        onSandboxReady: ctx.sandboxSetup.map((command) => ({
+          command,
+          timeoutMs: 15 * 60_000,
+        })),
+      },
+    },
+  });
+
+/** Run the required checks in `sandbox`; a failure note, or undefined. */
+const runChecks = async (
+  ctx: Context,
+  sandbox: Sandbox,
+): Promise<string | undefined> => {
+  for (const check of ctx.checks) {
+    ctx.log(`  check: ${check}`);
+    const { exitCode, stdout, stderr } = await sandbox.exec(check);
+    if (exitCode !== 0) {
+      const tail = `${stdout}\n${stderr}`.trim().split("\n").slice(-20);
+      return [
+        `Required check \`${check}\` failed (exit ${exitCode}).`,
+        "",
+        "```",
+        ...tail,
+        "```",
+      ].join("\n");
+    }
+  }
+  return undefined;
+};
+
+/**
+ * Read an agent's result block: the last `output.tag` tag in its output,
+ * validated against `output`'s schema. `sandbox.run()` has no `output`
+ * option yet, so the factory does this extraction itself.
+ */
+const readAgentResult = async <T>(
+  stdout: string,
+  output: OutputObjectDefinition<T>,
+): Promise<T | undefined> => {
+  const { tag, schema } = output;
+  const matches = [
+    ...stdout.matchAll(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "g")),
+  ];
+  const raw = matches
+    .at(-1)?.[1]
+    ?.trim()
+    .replace(/^```(?:json)?\s*|\s*```$/g, "");
+  if (raw === undefined) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  const validated = await schema["~standard"].validate(parsed);
+  return validated.issues ? undefined : validated.value;
+};
+
+const NO_PR = "Factory did not open a pull request.";
+const NOT_MERGED = "Factory did not merge this task.";
+const NOT_CLOSED =
+  "Factory did its work on this issue, then failed before closing it. A retry only closes it.";
+
+/**
+ * Comment why on `id` and mark it `factory-failed`. The label is added even
+ * if the comment can't be; rejects with the first error once both were tried.
+ */
+const recordFailure = async (
+  ctx: Context,
+  id: string,
+  headline: string,
+  note: string,
+) => {
+  ctx.log(`  failed: ${note.split("\n")[0]}`);
+  const errors: unknown[] = [];
+  await ctx.tracker
+    .comment(id, `${headline}\n\n${note}`)
+    .catch((error) => errors.push(error));
+  await ctx.tracker
+    .addLabel(id, LABELS.factoryFailed)
+    .catch((error) => errors.push(error));
+  if (errors.length > 0) throw errors[0];
+};
+
+/**
+ * Park a task the factory claimed and gave up on: record why, mark it
+ * `factory-failed`, then give the claim back. Labelled before it is open
+ * again, so no run sees it ready without the label. The claim is given back
+ * even if recording the failure fails, so the task is never left claimed.
+ * Never rejects: what it couldn't do is logged.
+ */
+const parkTask = async (
+  ctx: Context,
+  id: string,
+  headline: string,
+  note: string,
+) => {
+  await recordFailure(ctx, id, headline, note).catch((error) =>
+    ctx.log(`  could not record the failure on ${id}: ${messageOf(error)}`),
+  );
+  await ctx.tracker
+    .release(id)
+    .catch((error) =>
+      ctx.log(`  could not release the claim on ${id}: ${messageOf(error)}`),
+    );
+};
+
+const summarise = (
+  outcomes: readonly TaskOutcome[],
+  specs: readonly SpecOutcome[],
+): FactoryReport => ({
+  taken: outcomes.length,
+  accepted: outcomes.filter((o) => o.status === "accepted").length,
+  failed: outcomes.filter((o) => o.status === "failed").length,
+  pullRequests: [...outcomes, ...specs].flatMap((o) =>
+    o.pullRequestUrl ? [o.pullRequestUrl] : [],
+  ),
+  outcomes,
+  specs,
+});

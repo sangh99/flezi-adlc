@@ -997,7 +997,9 @@ describe("WorktreeDockerSandboxFactory — no-sandbox provider", () => {
     await initRepoWithCommit(hostDir);
     await commitFile(hostDir, "hello.txt", "hi", "add hello");
 
-    let receivedInfo: { hostWorktreePath?: string } | undefined;
+    let receivedInfo:
+      | { hostWorktreePath?: string; runsOnHost?: boolean }
+      | undefined;
     let execOut = "";
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -1015,6 +1017,7 @@ describe("WorktreeDockerSandboxFactory — no-sandbox provider", () => {
     const worktree = await findCreatedWorktree(hostDir);
     expect(worktree).toBeUndefined();
     expect(receivedInfo?.hostWorktreePath).toBe(hostDir);
+    expect(receivedInfo?.runsOnHost).toBe(true);
     expect(execOut).toBe("hi");
   });
 
@@ -1024,12 +1027,14 @@ describe("WorktreeDockerSandboxFactory — no-sandbox provider", () => {
     await initRepoWithCommit(hostDir);
 
     let observedWorktreePath: string | undefined;
+    let observedRunsOnHost: boolean | undefined;
     await Effect.runPromise(
       Effect.gen(function* () {
         const factory = yield* SandboxFactory;
         yield* factory.withSandbox((info) =>
           Effect.sync(() => {
             observedWorktreePath = info.hostWorktreePath;
+            observedRunsOnHost = info.runsOnHost;
           }),
         );
       }).pipe(
@@ -1037,6 +1042,7 @@ describe("WorktreeDockerSandboxFactory — no-sandbox provider", () => {
       ),
     );
 
+    expect(observedRunsOnHost).toBe(true);
     expect(observedWorktreePath).toBeDefined();
     expect(observedWorktreePath).toContain(
       join(hostDir, ".sandcastle", "worktrees"),

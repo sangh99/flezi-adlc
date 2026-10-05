@@ -1,7 +1,7 @@
 import { lstatSync } from "node:fs";
 
-// Prettier refuses to format symbolic links (e.g. the AGENTS.md -> CLAUDE.md
-// and .claude/skills -> ../.agents/skills symlinks), which would otherwise
+// Prettier refuses to format symbolic links (e.g. the
+// .claude/skills -> ../.agents/skills symlink), which would otherwise
 // fail the pre-commit hook on any commit that stages them. Filter symlinks
 // out before handing paths to prettier.
 const formattable = (files) =>
